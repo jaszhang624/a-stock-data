@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+*.md
+!README_DOCKER.md
+tests/
+scripts/tmp_blocks/
+.venv/
+data/
+cache/
+.env

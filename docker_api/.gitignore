@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+data/
+cache/
+*.tar.gz
+scripts/tmp_blocks/
+.venv-test/
+Dockerfile.broken-*
+release/*.json

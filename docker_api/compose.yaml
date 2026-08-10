@@ -1,0 +1,21 @@
+services:
+  a-stock-data-api:
+    image: a-stock-data-api:${IMAGE_TAG:-latest}
+    container_name: a-stock-data-api
+    restart: unless-stopped
+    ports:
+      - "8765:8000"
+    volumes:
+      - /share/Docker/a-stock-data/data:/app/data
+      - /share/Docker/a-stock-data/cache:/app/cache
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
