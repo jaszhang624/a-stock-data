@@ -46,6 +46,15 @@ async def health_ready():
     }
 
 
+@router.get("/health/sources")
+async def health_sources():
+    """Read-only snapshot of source governor health state."""
+    from astock_api.source_governor import get_governor
+
+    governor = get_governor()
+    return {"sources": governor.get_health_snapshot()}
+
+
 @router.get("/health/tdx")
 async def health_tdx():
     """Check mootdx connectivity with a real K-line request."""

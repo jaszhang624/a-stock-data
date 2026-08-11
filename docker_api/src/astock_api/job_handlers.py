@@ -3,12 +3,17 @@
 import logging
 
 from astock_api.job_engine import TransientJobError, PermanentJobError
+from astock_api.source_governor import (
+    get_governor,
+    GovernorUnavailableError,
+    GovernorUnsupportedError,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def market_bars_handler(payload: dict):
-    """Handle one daily market-bars snapshot chunk via mootdx.
+    """Handle one daily market-bars snapshot chunk via SourceGovernor.
 
     payload: {"symbol": "600519", "frequency": "daily", "count": 100}
     """
@@ -28,45 +33,22 @@ def market_bars_handler(payload: dict):
         )
 
     try:
-        from astock_api.upstream.common import tdx_client
-
-        client = tdx_client()
-        df = client.bars(symbol, frequency=9, offset=count)
+        governor = get_governor()
+        result = governor.fetch_market_bars(symbol, frequency, count)
+    except GovernorUnavailableError as e:
+        raise TransientJobError(
+            f"all sources unavailable for {symbol}: {e}"
+        ) from e
+    except GovernorUnsupportedError as e:
+        raise PermanentJobError(
+            f"no source supports {symbol}: {e}"
+        ) from e
     except Exception as e:
         raise TransientJobError(
-            f"mootdx bars failed for {symbol}: {e}"
+            f"source governor failed for {symbol}: {e}"
         ) from e
 
-    if df is None or not hasattr(df, "empty") or df.empty:
-        raise TransientJobError(
-            f"mootdx returned empty bars for {symbol}"
-        )
-
-    columns = [
-        "datetime",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "amount",
-    ]
-
-    missing = [c for c in columns if c not in df.columns]
-    if missing:
-        raise PermanentJobError(
-            f"mootdx bars schema missing columns: {','.join(missing)}"
-        )
-
-    rows = df.tail(count)[columns].to_dict(orient="records")
-
-    return {
-        "source": "mootdx",
-        "symbol": symbol,
-        "frequency": "daily",
-        "requested_count": count,
-        "rows": rows,
-    }
+    return result
 
 
 def get_handler(job_type: str):
