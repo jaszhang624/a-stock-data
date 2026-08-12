@@ -217,11 +217,14 @@ class BaiduSource(MarketBarsSource):
             raise SourceTransientError(f"baidu request failed for {symbol}: {e}") from e
 
         # baidu_kline_with_ma returns {'keys': ..., 'rows': ...} on success
-        # but when ResultCode != 0, the upstream function may return a list
+        # when ResultCode != 0, it returns {'keys': [], 'rows': [], 'ResultCode': ...}
         if isinstance(result, dict):
-            # Check if this is actually the raw baidu response (ResultCode present)
+            # Check for error response from baidu_kline_with_ma
             if "ResultCode" in result:
-                return result
+                rc = str(result.get("ResultCode", -1))
+                raise SourceTransientError(
+                    f"baidu returned ResultCode={rc} for {symbol}"
+                )
             # Normal success path from baidu_kline_with_ma
             keys = result.get("keys", [])
             rows = result.get("rows", [])

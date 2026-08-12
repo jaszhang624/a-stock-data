@@ -254,3 +254,88 @@ class TestGovernorStillMootdxOnly:
 
         assert result["source"] == "mootdx"
         mock_gov.fetch_market_bars.assert_called_once_with("600519", "daily", 3)
+
+
+class TestBaiduSourceErrorResponses:
+    """Regression tests for Baidu error response parsing (R2 hotfix)."""
+
+    def test_result_code_403_list_result(self):
+        """A. ResultCode=403, Result=[] → SourceTransientError, no AttributeError."""
+        from astock_api.source_adapters import BaiduSource, SourceTransientError
+
+        with patch("astock_api.upstream.tencent.requests.get") as mock_get:
+            # Simulate Baidu returning ResultCode=403 with empty list Result
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"ResultCode": 403, "Result": []}
+            mock_get.return_value = mock_resp
+
+            source = BaiduSource()
+            with pytest.raises(SourceTransientError):
+                source.fetch_market_bars("600519", "daily", 3)
+
+    def test_result_code_403_string_list_result(self):
+        """B. ResultCode="403", Result=[] → SourceTransientError."""
+        from astock_api.source_adapters import BaiduSource, SourceTransientError
+
+        with patch("astock_api.upstream.tencent.requests.get") as mock_get:
+            # String ResultCode variant
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"ResultCode": "403", "Result": []}
+            mock_get.return_value = mock_resp
+
+            source = BaiduSource()
+            with pytest.raises(SourceTransientError):
+                source.fetch_market_bars("600519", "daily", 3)
+
+    def test_other_nonzero_result_code_with_list(self):
+        """C. Other non-zero ResultCode with list Result → typed source error."""
+        from astock_api.source_adapters import BaiduSource, SourceTransientError
+
+        with patch("astock_api.upstream.tencent.requests.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"ResultCode": 500, "Result": []}
+            mock_get.return_value = mock_resp
+
+            source = BaiduSource()
+            with pytest.raises(SourceTransientError):
+                source.fetch_market_bars("600519", "daily", 3)
+
+    def test_successful_dict_response(self):
+        """D. Successful dict response → still parses normally."""
+        from astock_api.source_adapters import BaiduSource
+
+        with patch("astock_api.upstream.tencent.requests.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "ResultCode": 0,
+                "Result": {
+                    "newMarketData": {
+                        "keys": ["time", "open", "high", "low", "close", "volume", "amount"],
+                        "marketData": "2026-08-11,1348.00,1352.65,1338.00,1346.50,2707300,3640046336.00;2026-08-10,1325.00,1359.97,1318.08,1348.86,6268500,8428304384.00",
+                    }
+                },
+            }
+            mock_get.return_value = mock_resp
+
+            source = BaiduSource()
+            result = source.fetch_market_bars("600519", "daily", 3)
+
+        assert result["source"] == "baidu"
+        assert len(result["rows"]) == 2
+
+    def test_malformed_response(self):
+        """E. Malformed response → typed source error."""
+        from astock_api.source_adapters import BaiduSource, SourceDataError
+
+        with patch("astock_api.upstream.tencent.requests.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "ResultCode": 0,
+                "Result": {"newMarketData": {"keys": [], "marketData": ""}},
+            }
+            mock_get.return_value = mock_resp
+
+            source = BaiduSource()
+            with pytest.raises(SourceDataError):
+                source.fetch_market_bars("600519", "daily", 3)
+

@@ -61,7 +61,13 @@ def baidu_kline_with_ma(code: str, start_time: str='') -> dict:
     headers = {'User-Agent': UA, 'Accept': 'application/vnd.finance-web.v1+json', 'Origin': 'https://gushitong.baidu.com', 'Referer': 'https://gushitong.baidu.com/'}
     r = requests.get(url, params=params, headers=headers, timeout=10)
     d = r.json()
-    result = d.get('Result', {})
+
+    # Result may be a list when Baidu returns an application-level error
+    result = d.get('Result')
+    if not isinstance(result, dict):
+        # Pass ResultCode through so caller can classify the error
+        return {'keys': [], 'rows': [], 'ResultCode': d.get('ResultCode', -1)}
+
     md = result.get('newMarketData', {})
     keys = md.get('keys', [])
     rows = md.get('marketData', '').split(';')
