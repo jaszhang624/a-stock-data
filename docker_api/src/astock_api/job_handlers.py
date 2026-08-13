@@ -126,8 +126,11 @@ def market_bars_sync_handler(payload: dict):
 
 def get_handler(job_type: str):
     """Get handler function for job type."""
+    from astock_api.security_master_handler import security_master_snapshot_handler
+
     handlers = {
         "market_bars_snapshot": market_bars_handler,
         "market_bars_sync": market_bars_sync_handler,
+        "security_master_snapshot": security_master_snapshot_handler,
     }
     return handlers.get(job_type)

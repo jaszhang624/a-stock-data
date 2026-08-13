@@ -236,7 +236,7 @@ class JobEngine:
 
                 for symbol in unique_symbols:
                     chunk_key = f"market_bars|{symbol}|{frequency}|{count}"
-                    payload = {"symbol": symbol, "frequency": frequency, "count": count}
+                    payload = {"job_type": "market_bars_snapshot", "symbol": symbol, "frequency": frequency, "count": count}
                     chunk_id = str(uuid.uuid4())
                     conn.execute(
                         "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -268,7 +268,7 @@ class JobEngine:
                 )
 
                 chunk_key = f"security_master|{source}|{as_of}"
-                payload = {"source": source, "as_of": as_of}
+                payload = {"job_type": "security_master_snapshot", "source": source, "as_of": as_of}
                 chunk_id = str(uuid.uuid4())
                 conn.execute(
                     "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -321,7 +321,7 @@ class JobEngine:
 
                 for symbol in unique_symbols:
                     chunk_key = f"market_bars_sync|{symbol}|{frequency}|{count}"
-                    payload = {"symbol": symbol, "frequency": frequency, "count": count}
+                    payload = {"job_type": "market_bars_sync", "symbol": symbol, "frequency": frequency, "count": count}
                     chunk_id = str(uuid.uuid4())
                     conn.execute(
                         "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",

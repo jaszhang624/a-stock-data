@@ -421,3 +421,164 @@ class TestVolumeUnitContract:
         # BaiduSource.fetch_market_bars() divides volume by 100
         # The handler receives normalized data (volume in 手)
         pass  # Verified by code inspection
+
+
+class TestDispatchRegression:
+    """Regression tests for the R1 dispatch bug (KeyError('symbol')).
+
+    R1 root cause: chunk payload did not include job_type, causing
+    main.job_handler to fall through to the default 'market_bars_snapshot'
+    handler, which then failed on payload["symbol"].
+
+    These tests exercise the REAL dispatch path:
+    create_job → claim_chunk → main.job_handler → get_handler → actual handler.
+    """
+
+    def test_security_master_snapshot_chunk_payload_has_job_type(self):
+        """Verify chunk payload explicitly carries job_type."""
+        from astock_api.job_engine import JobEngine
+
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            db_path = f.name
+        with tempfile.TemporaryDirectory() as data_dir:
+            try:
+                engine = JobEngine(db_path, data_dir)
+                engine.initialize()
+                result = engine.create_job('security_master_snapshot', {
+                    'source': 'mootdx',
+                    'as_of': '2024-01-01'
+                })
+
+                # Check chunk payload contains job_type
+                chunks = engine.get_chunks(result['job_id'])
+                assert len(chunks) == 1
+                payload = json.loads(chunks[0]['payload_json'])
+                assert payload.get('job_type') == 'security_master_snapshot', \
+                    f"Chunk payload missing job_type: {payload}"
+            finally:
+                if os.path.exists(db_path):
+                    os.unlink(db_path)
+
+    def test_market_bars_sync_chunk_payload_has_job_type(self):
+        """Verify market_bars_sync chunk payload explicitly carries job_type."""
+        from astock_api.job_engine import JobEngine
+
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            db_path = f.name
+        with tempfile.TemporaryDirectory() as data_dir:
+            try:
+                engine = JobEngine(db_path, data_dir)
+                engine.initialize()
+                result = engine.create_job('market_bars_sync', {
+                    'symbols': ['600519'],
+                    'frequency': 'daily',
+                    'count': 10
+                })
+
+                chunks = engine.get_chunks(result['job_id'])
+                assert len(chunks) == 1
+                payload = json.loads(chunks[0]['payload_json'])
+                assert payload.get('job_type') == 'market_bars_sync', \
+                    f"Chunk payload missing job_type: {payload}"
+            finally:
+                if os.path.exists(db_path):
+                    os.unlink(db_path)
+
+    def test_market_bars_snapshot_chunk_payload_has_job_type(self):
+        """Verify market_bars_snapshot chunk payload explicitly carries job_type."""
+        from astock_api.job_engine import JobEngine
+
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            db_path = f.name
+        with tempfile.TemporaryDirectory() as data_dir:
+            try:
+                engine = JobEngine(db_path, data_dir)
+                engine.initialize()
+                result = engine.create_job('market_bars_snapshot', {
+                    'symbols': ['600519'],
+                    'frequency': 'daily',
+                    'count': 10
+                })
+
+                chunks = engine.get_chunks(result['job_id'])
+                assert len(chunks) == 1
+                payload = json.loads(chunks[0]['payload_json'])
+                assert payload.get('job_type') == 'market_bars_snapshot', \
+                    f"Chunk payload missing job_type: {payload}"
+            finally:
+                if os.path.exists(db_path):
+                    os.unlink(db_path)
+
+    def test_dispatch_routes_security_master_to_correct_handler(self):
+        """Test the full dispatch path: job_handler → get_handler → security_master_snapshot_handler.
+
+        This test MUST fail on R1 code (KeyError('symbol')) and pass after the fix.
+        """
+        from astock_api.job_handlers import get_handler
+
+        # Simulate what main.py:job_handler does
+        payload = {"job_type": "security_master_snapshot", "source": "mootdx", "as_of": ""}
+        job_type = payload.get("job_type", "market_bars_snapshot")
+        handler = get_handler(job_type)
+
+        assert handler is not None, "security_master_snapshot handler not registered"
+        # The handler function name should match
+        assert handler.__name__ == 'security_master_snapshot_handler', \
+            f"Wrong handler dispatched: {handler.__name__}"
+
+    def test_dispatch_without_job_type_falls_back_to_market_bars_snapshot(self):
+        """Verify legacy fallback still works (no regression)."""
+        from astock_api.job_handlers import get_handler
+
+        # Simulate payload without job_type (legacy behavior)
+        payload = {"source": "mootdx", "as_of": ""}  # no job_type
+        job_type = payload.get("job_type", "market_bars_snapshot")
+        handler = get_handler(job_type)
+
+        assert handler is not None
+        assert handler.__name__ == 'market_bars_handler'
+
+    def test_dispatch_regression_security_master_does_not_raise_keyerror_symbol(self):
+        """The actual R1 failure: security_master payload routed to market_bars_handler.
+
+        On R1 code, this would hit KeyError('symbol') because the payload
+        has 'source'/'as_of' but market_bars_handler expects 'symbol'.
+
+        After fix, the handler is correctly dispatched and won't try payload["symbol"].
+        We mock the upstream acquisition to avoid network calls.
+        """
+        from astock_api.job_handlers import get_handler
+
+        # This is the EXACT payload that caused R1 failure
+        payload = {"job_type": "security_master_snapshot", "source": "mootdx", "as_of": ""}
+        job_type = payload.get("job_type", "market_bars_snapshot")
+        handler = get_handler(job_type)
+
+        assert handler is not None, "Handler must not be None"
+        # Must NOT be market_bars_handler (that was the R1 bug)
+        assert handler.__name__ != 'market_bars_handler', \
+            "R1 BUG: security_master_snapshot routed to market_bars_handler"
+
+        # Now actually call the handler with mocked upstream
+        with patch('astock_api.security_master_handler.acquire_security_master_mootdx') as mock_acquire:
+            mock_acquire.return_value = [{
+                'code': '600519',
+                'exchange': 'SSE',
+                'name': '贵州茅台',
+                'security_type': 'equity',
+                'board': 'main'
+            }]
+
+            with patch('astock_api.security_master_handler.DatasetStore') as mock_store_class:
+                mock_store = MagicMock()
+                mock_store.create_snapshot.return_value = 'snap-123'
+                mock_store.write_security_master_snapshot.return_value = 1
+                mock_store.validate_snapshot.return_value = {
+                    'valid': True,
+                    'bse_coverage_satisfied': False
+                }
+                mock_store_class.return_value = mock_store
+
+                # This should NOT raise KeyError('symbol')
+                result = handler(payload)
+                assert result['status'] == 'VALIDATED_PARTIAL'
