@@ -268,7 +268,7 @@ class JobEngine:
                 )
 
                 chunk_key = f"security_master|{source}|{as_of}"
-                payload = {"job_type": "security_master_snapshot", "source": source, "as_of": as_of}
+                payload = {"job_type": "security_master_snapshot", "job_id": job_id, "source": source, "as_of": as_of}
                 chunk_id = str(uuid.uuid4())
                 conn.execute(
                     "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -624,14 +624,13 @@ class JobEngine:
             self._mark_chunk_failed(chunk["chunk_id"], job_id, str(e))
             return None  # Permanent failure — continue with other chunks
         except Exception as e:
-            retry_count = chunk.get("retry_count", 0) or 0
-            if retry_count < MAX_RETRIES:
-                backoff = RETRY_BACKOFFS[retry_count] if retry_count < len(RETRY_BACKOFFS) else RETRY_BACKOFFS[-1]
-                next_retry = (datetime.now(timezone.utc) + timedelta(seconds=backoff)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-                self._mark_chunk_retry(chunk["chunk_id"], job_id, retry_count + 1, next_retry, str(e))
-            else:
-                self._mark_chunk_failed(chunk["chunk_id"], job_id, str(e))
-            return "transient"
+            # Unclassified exception → FAILED immediately.
+            # Do NOT retry or set WAITING_SOURCE: local deterministic errors
+            # (e.g., DuckDB catalog missing, file I/O) will never heal on retry.
+            # Expected upstream transients must arrive as TransientJobError.
+            logger.error("Chunk %s: unclassified exception — marking FAILED", chunk_key, exc_info=True)
+            self._mark_chunk_failed(chunk["chunk_id"], job_id, str(e))
+            return None  # Failure — continue with other chunks
 
         # Atomic write: file first, then DB
         result_path = self._atomic_write_result(job_id, chunk_key, data)

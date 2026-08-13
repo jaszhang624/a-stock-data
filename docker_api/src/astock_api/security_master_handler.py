@@ -231,6 +231,7 @@ def security_master_snapshot_handler(payload: dict):
 
     # 4. Create STAGING snapshot
     store = DatasetStore('/app/data/astock_data.duckdb')
+    store.bootstrap()  # Ensure tables exist before any access
     snapshot_id = store.create_snapshot(source, as_of, len(securities), checksum, 'STAGING')
 
     # 5. Write rows
