@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────
-JOB_TYPES = {"market_bars_snapshot"}
+JOB_TYPES = {"market_bars_snapshot", "security_master_snapshot", "market_bars_sync"}
 
 VALID_FREQUENCIES = {"daily", "1min", "5min", "15min", "30min", "1hour"}
 SUPPORTED_FREQUENCIES = {"daily"}  # Only daily for now
@@ -236,6 +236,91 @@ class JobEngine:
 
                 for symbol in unique_symbols:
                     chunk_key = f"market_bars|{symbol}|{frequency}|{count}"
+                    payload = {"symbol": symbol, "frequency": frequency, "count": count}
+                    chunk_id = str(uuid.uuid4())
+                    conn.execute(
+                        "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (chunk_id, job_id, chunk_key, json.dumps(payload), CHUNK_PENDING, now, now)
+                    )
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        elif job_type == "security_master_snapshot":
+            source = params.get("source", "")
+            as_of = params.get("as_of", "")
+
+            if not source:
+                raise ValueError("security_master_snapshot requires 'source' param")
+
+            job_id = str(uuid.uuid4())
+            now = self._now_iso()
+
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (job_id, job_type, status, params_json, total_chunks, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (job_id, job_type, JOB_PENDING, json.dumps(params), 1, now, now)
+                )
+
+                chunk_key = f"security_master|{source}|{as_of}"
+                payload = {"source": source, "as_of": as_of}
+                chunk_id = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (chunk_id, job_id, chunk_key, json.dumps(payload), CHUNK_PENDING, now, now)
+                )
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        elif job_type == "market_bars_sync":
+            symbols = params.get("symbols", [])
+            frequency = params.get("frequency", "daily")
+            count = params.get("count", 100)
+
+            # Validate frequency — only daily supported
+            if frequency not in SUPPORTED_FREQUENCIES:
+                raise ValueError("market_bars_sync currently supports daily only")
+
+            if not symbols or len(symbols) > 500:
+                raise ValueError("symbols must be 1-500")
+            if not (1 <= count <= 800):
+                raise ValueError("count must be 1-800")
+
+            # Deduplicate preserving order, reject ".."
+            seen = set()
+            unique_symbols = []
+            for s in symbols:
+                s = str(s)
+                if ".." in s:
+                    raise ValueError(f"Invalid symbol (contains ..): {s}")
+                if not SYMBOL_PATTERN.match(s):
+                    raise ValueError(f"Invalid symbol: {s}")
+                if s not in seen:
+                    seen.add(s)
+                    unique_symbols.append(s)
+
+            job_id = str(uuid.uuid4())
+            now = self._now_iso()
+
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (job_id, job_type, status, params_json, total_chunks, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (job_id, job_type, JOB_PENDING, json.dumps(params), len(unique_symbols), now, now)
+                )
+
+                for symbol in unique_symbols:
+                    chunk_key = f"market_bars_sync|{symbol}|{frequency}|{count}"
                     payload = {"symbol": symbol, "frequency": frequency, "count": count}
                     chunk_id = str(uuid.uuid4())
                     conn.execute(
