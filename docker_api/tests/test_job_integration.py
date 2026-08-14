@@ -1114,3 +1114,57 @@ class TestHealthVersionEndpoint:
         assert r1.status_code == 200
         assert r2.status_code == 200
         assert r1.json() == r2.json()
+
+
+class TestUniverseEndpoint:
+    """Tests for GET /api/v1/universe read-only endpoint."""
+
+    def test_universe_returns_200(self):
+        """Verify /api/v1/universe returns HTTP 200."""
+        from fastapi.testclient import TestClient
+        from astock_api.main import app
+
+        client = TestClient(app)
+        response = client.get("/api/v1/universe")
+        assert response.status_code == 200
+
+    def test_universe_has_required_fields(self):
+        """Verify /api/v1/universe returns snapshot_id, total, securities."""
+        from fastapi.testclient import TestClient
+        from astock_api.main import app
+
+        client = TestClient(app)
+        response = client.get("/api/v1/universe")
+        data = response.json()
+
+        assert "snapshot_id" in data
+        assert "total" in data
+        assert "securities" in data
+
+    def test_universe_securities_have_required_fields(self):
+        """Verify each security has security_id, code, exchange, name, security_type."""
+        from fastapi.testclient import TestClient
+        from astock_api.main import app
+
+        client = TestClient(app)
+        response = client.get("/api/v1/universe")
+        data = response.json()
+
+        for sec in data["securities"]:
+            assert "security_id" in sec
+            assert "code" in sec
+            assert "exchange" in sec
+            assert "name" in sec
+            assert "security_type" in sec
+
+    def test_universe_readonly(self):
+        """Verify /api/v1/universe is read-only (no side effects)."""
+        from fastapi.testclient import TestClient
+        from astock_api.main import app
+
+        client = TestClient(app)
+        r1 = client.get("/api/v1/universe")
+        r2 = client.get("/api/v1/universe")
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r1.json()["total"] == r2.json()["total"]
