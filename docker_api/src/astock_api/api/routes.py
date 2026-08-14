@@ -338,3 +338,50 @@ async def backup_announcements(symbol: str, page_size: int = 10):
 
     result = func(symbol, page_size)
     return normalize_result(result)
+
+
+@router.get("/universe")
+async def get_universe():
+    """Read-only: return A-share security universe from the latest active snapshot."""
+    import duckdb as dd
+
+    try:
+        conn = dd.connect("/app/data/astock_data.duckdb")
+
+        # Get latest snapshot
+        snap = conn.execute(
+            "SELECT snapshot_id FROM security_master_snapshots ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+
+        if not snap:
+            conn.close()
+            return {"total": 0, "securities": [], "error": "no_snapshot_found"}
+
+        snapshot_id = snap[0]
+
+        # Get all securities from latest snapshot
+        rows = conn.execute(
+            "SELECT security_id, code, exchange, name, security_type FROM security_master WHERE snapshot_id=? ORDER BY code",
+            [snapshot_id]
+        ).fetchall()
+
+        conn.close()
+
+        securities = []
+        for row in rows:
+            securities.append({
+                "security_id": row[0],
+                "code": row[1],
+                "exchange": row[2],
+                "name": row[3],
+                "security_type": row[4]
+            })
+
+        return {
+            "snapshot_id": snapshot_id,
+            "total": len(securities),
+            "securities": securities
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"universe query failed: {str(e)}")
