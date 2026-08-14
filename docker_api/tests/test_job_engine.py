@@ -593,6 +593,14 @@ class TestPhase8Regression:
         """TEST 31: /health/tdx endpoint exists."""
         # Tested at integration level
 
+    def test_32_health_version_readonly(self):
+        """TEST 32: /health/version returns build metadata (read-only)."""
+        # Tested at integration level
+
+    def test_33_health_version_fields_present(self):
+        """TEST 33: /health/version has all required identity fields."""
+        # Tested at integration level
+
 
 class TestR2Regression:
     """r2 regression tests for r1 audit findings."""

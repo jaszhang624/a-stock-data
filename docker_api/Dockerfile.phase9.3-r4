@@ -1,0 +1,13 @@
+FROM a-stock-data-api:281fc69-phase9-3-r3
+
+# Build metadata (read-only, injected at build time)
+ENV BUILD_SERVICE=a-stock-data-api \
+    BUILD_IMAGE=a-stock-data-api:281fc69-phase9-3-r4 \
+    BUILD_PHASE=9.3 \
+    BUILD_RELEASE=r4 \
+    BUILD_COMMIT=281fc69
+
+# Copy new source code (overwrites old)
+COPY src/ ./src/
+
+EXPOSE 8000

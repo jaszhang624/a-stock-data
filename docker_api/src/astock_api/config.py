@@ -26,3 +26,11 @@ CACHE_DIR = os.getenv("ASTOCK_CACHE_DIR", "/app/cache")
 
 # Logging
 LOG_LEVEL = os.getenv("ASTOCK_LOG_LEVEL", "INFO")
+
+# Build metadata (injected at Docker build time via ENV)
+BUILD_SERVICE = os.getenv("BUILD_SERVICE", "a-stock-data-api")
+BUILD_IMAGE = os.getenv("BUILD_IMAGE", "")
+BUILD_PHASE = os.getenv("BUILD_PHASE", "")
+BUILD_RELEASE = os.getenv("BUILD_RELEASE", "")
+BUILD_COMMIT = os.getenv("BUILD_COMMIT", "")
+BUILD_TIME = os.getenv("BUILD_TIME", "")

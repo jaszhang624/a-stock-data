@@ -3,7 +3,9 @@ import os
 from fastapi import APIRouter, HTTPException
 
 from astock_api.config import (
-    UPSTREAM_VERSION, UPSTREAM_COMMIT, API_VERSION
+    UPSTREAM_VERSION, UPSTREAM_COMMIT, API_VERSION,
+    BUILD_SERVICE, BUILD_IMAGE, BUILD_PHASE, BUILD_RELEASE,
+    BUILD_COMMIT, BUILD_TIME
 )
 from astock_api.registry import list_functions
 
@@ -43,6 +45,20 @@ async def health_ready():
     return {
         "status": "ready",
         "functions_count": len(funcs),
+    }
+
+
+@router.get("/health/version")
+async def health_version():
+    """Read-only build identity metadata. No side effects."""
+    return {
+        "service": BUILD_SERVICE,
+        "image": BUILD_IMAGE,
+        "phase": BUILD_PHASE,
+        "release": BUILD_RELEASE,
+        "git_commit": BUILD_COMMIT,
+        "api_version": API_VERSION,
+        "build_time": BUILD_TIME,
     }
 
 

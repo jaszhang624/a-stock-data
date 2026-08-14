@@ -1059,3 +1059,58 @@ class TestR4MarketBarsSyncFixes:
         # SZSE range: 00xxxx, 30xxxx
         assert DatasetStore.make_security_id('000001') == 'SZSE:000001'
         assert DatasetStore.make_security_id('300750') == 'SZSE:300750'
+
+
+class TestHealthVersionEndpoint:
+    """Tests for /health/version build identity endpoint."""
+
+    def test_health_version_returns_required_fields(self):
+        """Verify /health/version returns all required identity fields."""
+        from fastapi.testclient import TestClient
+        from astock_api.main import app
+
+        client = TestClient(app)
+        response = client.get("/health/version")
+        assert response.status_code == 200
+
+        data = response.json()
+        required_fields = ["service", "image", "phase", "release", "git_commit", "api_version", "build_time"]
+        for field in required_fields:
+            assert field in data, f"Missing required field: {field}"
+
+    def test_health_version_api_version(self):
+        """Verify api_version is v1."""
+        from fastapi.testclient import TestClient
+        from astock_api.main import app
+
+        client = TestClient(app)
+        response = client.get("/health/version")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["api_version"] == "v1"
+
+    def test_health_version_service_name(self):
+        """Verify service name is correct."""
+        from fastapi.testclient import TestClient
+        from astock_api.main import app
+
+        client = TestClient(app)
+        response = client.get("/health/version")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["service"] == "a-stock-data-api"
+
+    def test_health_version_readonly(self):
+        """Verify /health/version is read-only (no side effects)."""
+        from fastapi.testclient import TestClient
+        from astock_api.main import app
+
+        client = TestClient(app)
+        # Call twice - should return same result, no state change
+        r1 = client.get("/health/version")
+        r2 = client.get("/health/version")
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r1.json() == r2.json()
