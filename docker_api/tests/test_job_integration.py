@@ -143,9 +143,10 @@ class TestJobCreation:
             try:
                 engine = JobEngine(db_path, data_dir)
                 engine.initialize()
-                # SYMBOL_PATTERN is ^[A-Za-z0-9.\-_]+$ — "INVALID" matches (all uppercase letters)
+                # SYMBOL_PATTERN is ^[A-Za-z0-9.\\-_]+$ — "INVALID" matches (all uppercase letters)
                 # Use a symbol with special chars that actually fails the pattern
-                with pytest.raises(ValueError, match="Invalid symbol"):
+                # Note: 6-digit numeric check fires before SYMBOL_PATTERN for market_bars_sync
+                with pytest.raises(ValueError, match="Invalid symbol|6-digit"):
                     engine.create_job('market_bars_sync', {
                         'symbols': ['600519!'],  # ! not in SYMBOL_PATTERN
                         'frequency': 'daily',
@@ -887,3 +888,174 @@ class TestR3RuntimeWiring:
 
             finally:
                 os.unlink(db_path)
+
+
+class TestR4MarketBarsSyncFixes:
+    """Regression tests for Phase 9.3 R4 market_bars_sync fixes.
+
+    R4 root causes:
+    1. job_id missing from market_bars_sync chunk payload → persisted rows have empty job_id
+    2. DuckDB/local exceptions wrapped as TransientJobError → WAITING_SOURCE instead of FAILED
+    3. create_job permits non-6-digit symbols that handler will reject
+    """
+
+    def test_market_bars_sync_chunk_payload_has_job_id(self):
+        """R4 Fix 1: market_bars_sync chunk payload must carry job_id."""
+        import tempfile, os, json
+        from astock_api.job_engine import JobEngine
+
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            db_path = f.name
+        with tempfile.TemporaryDirectory() as data_dir:
+            try:
+                engine = JobEngine(db_path, data_dir)
+                engine.initialize()
+                result = engine.create_job('market_bars_sync', {
+                    'symbols': ['600519'],
+                    'frequency': 'daily',
+                    'count': 10
+                })
+
+                chunks = engine.get_chunks(result['job_id'])
+                assert len(chunks) == 1
+                payload = json.loads(chunks[0]['payload_json'])
+
+                # Verify all required keys
+                assert payload.get('job_type') == 'market_bars_sync'
+                assert payload.get('job_id') == result['job_id'], \
+                    f"Chunk job_id mismatch: {payload.get('job_id')} != {result['job_id']}"
+                assert payload.get('symbol') == '600519'
+                assert payload.get('frequency') == 'daily'
+                assert payload.get('count') == 10
+            finally:
+                if os.path.exists(db_path):
+                    os.unlink(db_path)
+
+    def test_market_bars_sync_local_error_fails_not_retries(self):
+        """R4 Fix 2: Local DatasetStore/DuckDB errors must FAIL, not WAITING_SOURCE.
+
+        Inject a local failure in DatasetStore and verify the job engine
+        marks it FAILED (not WAITING_SOURCE) with no retry increment.
+        """
+        import tempfile, os
+        from astock_api.job_engine import JobEngine
+
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            db_path = f.name
+        with tempfile.TemporaryDirectory() as data_dir:
+            try:
+                engine = JobEngine(db_path, data_dir)
+                engine.initialize()
+
+                # Create a market_bars_sync job with valid symbol
+                result = engine.create_job('market_bars_sync', {
+                    'symbols': ['600519'],
+                    'frequency': 'daily',
+                    'count': 10
+                })
+                job_id = result['job_id']
+
+                # Mock the handler to raise a local DuckDB-like error
+                from unittest.mock import patch
+
+                def failing_handler(payload):
+                    raise RuntimeError("simulated DuckDB catalog error")
+
+                # Get the chunk and execute it directly
+                chunks = engine.get_chunks(job_id)
+                assert len(chunks) == 1
+
+                with patch('astock_api.job_handlers.market_bars_sync_handler', side_effect=failing_handler):
+                    from astock_api.job_handlers import get_handler
+                    handler = get_handler('market_bars_sync')
+                    engine._execute_chunk(chunks[0], handler)
+
+                # Check job status: must be FAILED, not WAITING_SOURCE
+                conn = engine._get_conn()
+                try:
+                    job = conn.execute(
+                        "SELECT status, last_error FROM jobs WHERE job_id=?", (job_id,)
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+                assert job[0] == 'FAILED', \
+                    f"Job should be FAILED for local errors, got: {job[0]}"
+                assert job[0] != 'WAITING_SOURCE', \
+                    "Job must NOT be WAITING_SOURCE for local errors"
+
+                # Check chunk status
+                conn = engine._get_conn()
+                try:
+                    chunk_status = conn.execute(
+                        "SELECT status FROM job_chunks WHERE job_id=?", (job_id,)
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+                assert chunk_status[0] == 'FAILED', \
+                    f"Chunk should be FAILED, got: {chunk_status[0]}"
+
+            finally:
+                if os.path.exists(db_path):
+                    os.unlink(db_path)
+
+    def test_market_bars_sync_rejects_non_six_digit_symbol(self):
+        """R4 Fix 3: create_job must reject non-6-digit symbols for market_bars_sync."""
+        import tempfile, os
+        from astock_api.job_engine import JobEngine
+
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            db_path = f.name
+        with tempfile.TemporaryDirectory() as data_dir:
+            try:
+                engine = JobEngine(db_path, data_dir)
+                engine.initialize()
+
+                # Should reject "SSE:600519" format
+                try:
+                    engine.create_job('market_bars_sync', {
+                        'symbols': ['SSE:600519'],
+                        'frequency': 'daily',
+                        'count': 10
+                    })
+                    assert False, "Should have rejected SSE:600519"
+                except ValueError as e:
+                    assert '6-digit' in str(e).lower() or 'numeric' in str(e).lower(), \
+                        f"Error message should mention 6-digit/numeric: {e}"
+
+                # Should reject short symbols
+                try:
+                    engine.create_job('market_bars_sync', {
+                        'symbols': ['60519'],
+                        'frequency': 'daily',
+                        'count': 10
+                    })
+                    assert False, "Should have rejected short symbol"
+                except ValueError as e:
+                    assert '6-digit' in str(e).lower() or 'numeric' in str(e).lower(), \
+                        f"Error message should mention 6-digit/numeric: {e}"
+
+                # Should accept valid 6-digit symbol
+                result = engine.create_job('market_bars_sync', {
+                    'symbols': ['600519'],
+                    'frequency': 'daily',
+                    'count': 10
+                })
+                assert result['job_id'] is not None
+
+            finally:
+                if os.path.exists(db_path):
+                    os.unlink(db_path)
+
+    def test_market_bars_sync_canonical_identity(self):
+        """Verify handler converts 600519 → SSE:600519 via DatasetStore.make_security_id."""
+        from astock_api.dataset_store import DatasetStore
+
+        # SSE range: 60xxxx, 68xxxx
+        assert DatasetStore.make_security_id('600519') == 'SSE:600519'
+        assert DatasetStore.make_security_id('688001') == 'SSE:688001'
+
+        # SZSE range: 00xxxx, 30xxxx
+        assert DatasetStore.make_security_id('000001') == 'SZSE:000001'
+        assert DatasetStore.make_security_id('300750') == 'SZSE:300750'

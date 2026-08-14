@@ -112,14 +112,11 @@ def market_bars_sync_handler(payload: dict):
             })
 
     # Step 3: Write to DuckDB canonical store (idempotent UPSERT)
-    try:
-        store = DatasetStore('/app/data/astock_data.duckdb')
-        store.bootstrap()  # Ensure tables exist
+    store = DatasetStore('/app/data/astock_data.duckdb')
+    store.bootstrap()  # Ensure tables exist
 
-        # Write bars with crash-safe transaction (BEGIN → UPSERT → COMMIT)
-        store.write_market_bars(security_id, bars, 'mootdx', payload.get('job_id', ''))
-    except Exception as e:
-        raise TransientJobError(f"DuckDB write failed for {symbol}: {e}") from e
+    # Write bars with crash-safe transaction (BEGIN → UPSERT → COMMIT)
+    store.write_market_bars(security_id, bars, 'mootdx', payload.get('job_id', ''))
 
     return {"security_id": security_id, "bars_count": len(bars)}
 

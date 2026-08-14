@@ -303,6 +303,9 @@ class JobEngine:
                 s = str(s)
                 if ".." in s:
                     raise ValueError(f"Invalid symbol (contains ..): {s}")
+                # market_bars_sync requires 6-digit numeric symbols (handler contract)
+                if len(s) != 6 or not s.isdigit():
+                    raise ValueError(f"market_bars_sync requires 6-digit numeric symbol: {s}")
                 if not SYMBOL_PATTERN.match(s):
                     raise ValueError(f"Invalid symbol: {s}")
                 if s not in seen:
@@ -321,7 +324,7 @@ class JobEngine:
 
                 for symbol in unique_symbols:
                     chunk_key = f"market_bars_sync|{symbol}|{frequency}|{count}"
-                    payload = {"job_type": "market_bars_sync", "symbol": symbol, "frequency": frequency, "count": count}
+                    payload = {"job_type": "market_bars_sync", "job_id": job_id, "symbol": symbol, "frequency": frequency, "count": count}
                     chunk_id = str(uuid.uuid4())
                     conn.execute(
                         "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
