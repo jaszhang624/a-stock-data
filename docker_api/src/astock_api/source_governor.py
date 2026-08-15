@@ -210,13 +210,17 @@ class SourceGovernor:
                         self._persist(name)
                 errors.append(e)
 
-            except SourceError as e:
-                # Transient / Data error — increment consecutive failures.
+            except SourceTransientError as e:
+                # Transient error — increment consecutive failures.
                 with lock:
                     health["consecutive_failures"] += 1
                     if health["consecutive_failures"] >= self.OPEN_THRESHOLD:
                         self._set_open(name)
                     self._persist(name)
+                errors.append(e)
+
+            except SourceDataError as e:
+                # Data error — does NOT trigger circuit breaker.
                 errors.append(e)
 
         # All sources failed — distinguish unsupported vs unavailable.
