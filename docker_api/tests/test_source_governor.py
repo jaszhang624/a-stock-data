@@ -518,8 +518,8 @@ class TestHealthCounters:
         assert health["open_until"] == 1060.0
 
     def test_cooldown_expired_data_error_reopens(self):
-        """G. Cooldown expired + DataError → re-OPEN."""
-        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
+        """G. Cooldown expired + DataError → CLOSED (source reachable, data issue is not health concern)."""
+        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError, GovernorUnsupportedError
 
         mock_source = MagicMock()
         mock_source.name = "mootdx"
@@ -542,7 +542,8 @@ class TestHealthCounters:
         # Advance past cooldown → HALF_OPEN probe
         g.now_fn = lambda: 1030.0
 
-        with pytest.raises(GovernorUnavailableError):
+        # DataError only → GovernorUnsupportedError (no transient errors)
+        with pytest.raises(GovernorUnsupportedError):
             g.fetch_market_bars("600519", "daily", 3)
 
         # DataError does NOT trigger OPEN — source reached, data issue is not a health concern.
