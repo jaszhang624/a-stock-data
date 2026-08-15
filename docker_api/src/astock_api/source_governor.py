@@ -229,13 +229,17 @@ class SourceGovernor:
                 errors.append(e)
 
         # All sources failed — distinguish unsupported vs unavailable.
-        # Only GovernorUnsupportedError if ALL sources returned SourceUnsupportedError.
-        # If any source returned a transient/data error (or was OPEN/HALF_OPEN), the request is valid but sources are unavailable.
-        if errors and all(
-            isinstance(e, SourceUnsupportedError) for e in errors
-        ):
+        # GovernorUnsupportedError if ALL errors are non-transient (unsupported or data errors).
+        # Only GovernorUnavailableError if at least one source returned a transient error.
+        has_transient = any(
+            isinstance(e, SourceTransientError) for e in errors
+        )
+
+        if not has_transient:
+            # All sources returned unsupported or data errors — symbol simply has no data.
+            # This is a permanent condition; retrying will not help.
             raise GovernorUnsupportedError(
-                f"no source supports symbol {symbol}: {[str(e) for e in errors]}",
+                f"no data available for symbol {symbol}: {[str(e) for e in errors]}",
                 source_errors=errors,
             )
 
