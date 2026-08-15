@@ -539,14 +539,16 @@ class TestHealthCounters:
         with pytest.raises(GovernorUnavailableError):
             g.fetch_market_bars("600519", "daily", 3)
 
-        # Advance past cooldown
+        # Advance past cooldown → HALF_OPEN probe
         g.now_fn = lambda: 1030.0
 
         with pytest.raises(GovernorUnavailableError):
             g.fetch_market_bars("600519", "daily", 3)
 
+        # DataError does NOT trigger OPEN — source reached, data issue is not a health concern.
+        # HALF_OPEN probe with DataError → CLOSED (source is reachable).
         health = g.get_source_health("mootdx")
-        assert health["state"] == "OPEN"
+        assert health["state"] == "CLOSED"
 
     def test_unsupported_does_not_open(self):
         """E. Unsupported does not increase failures or OPEN."""
@@ -1247,8 +1249,8 @@ class TestHalfOpen:
         assert health["state"] == "OPEN"
         assert health["open_until"] == 1060.0
 
-    def test_half_open_data_error_reopens(self):
-        """D. HALF_OPEN DataError → OPEN."""
+    def test_half_open_data_error_closes(self):
+        """D. HALF_OPEN DataError → CLOSED (source reachable, data issue is not health concern)."""
         from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
 
         mock_source = MagicMock()
@@ -1273,7 +1275,8 @@ class TestHalfOpen:
         with pytest.raises(GovernorUnavailableError):
             g.fetch_market_bars("600519", "daily", 3)
 
-        assert g.get_source_health("mootdx")["state"] == "OPEN"
+        # DataError does NOT trigger OPEN — source reached, data issue is not a health concern.
+        assert g.get_source_health("mootdx")["state"] == "CLOSED"
 
     def test_half_open_unsupported_reopens_no_failure_increment(self):
         """E. HALF_OPEN Unsupported → OPEN, failures not incremented."""

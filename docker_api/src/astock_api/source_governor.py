@@ -221,6 +221,11 @@ class SourceGovernor:
 
             except SourceDataError as e:
                 # Data error — does NOT trigger circuit breaker.
+                with lock:
+                    if health["state"] == "HALF_OPEN":
+                        # Probe succeeded in reaching the source — data issue is not a health concern.
+                        self._set_closed(name)
+                        self._persist(name)
                 errors.append(e)
 
         # All sources failed — distinguish unsupported vs unavailable.
