@@ -340,7 +340,11 @@ async def backup_announcements(symbol: str, page_size: int = 10):
     return normalize_result(result)
 
 
-@router.get("/universe")
+# ── Universe (read-only, no auth required) ───────────────────────────
+
+universe_router = APIRouter(prefix="/api/v1")
+
+@universe_router.get("/universe")
 async def get_universe():
     """Read-only: return A-share security universe from the latest active snapshot."""
     import duckdb as dd

@@ -184,8 +184,9 @@ if ASTOCK_API_KEY:
 app.include_router(health_router)
 
 # Mount API routes
-from astock_api.api.routes import router as api_routes
+from astock_api.api.routes import router as api_routes, universe_router
 app.include_router(api_routes)
+app.include_router(universe_router)
 
 # Mount job routes (job engine started in lifespan)
 from astock_api.job_routes import router as job_router
