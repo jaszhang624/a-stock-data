@@ -70,6 +70,12 @@ class MootdxSource(MarketBarsSource):
     def fetch_market_bars(
         self, symbol: str, frequency: str, count: int
     ) -> dict[str, Any]:
+        # North Exchange (4x/8x) — mootdx does not support these markets.
+        if symbol.startswith(("4", "8")):
+            raise SourceUnsupportedError(
+                f"mootdx does not support North Exchange symbol: {symbol}"
+            )
+
         try:
             client = self._get_client()
         except Exception as e:
