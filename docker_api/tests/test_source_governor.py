@@ -856,10 +856,10 @@ class TestHealthCounters:
         mock_source.fetch_market_bars.assert_called_once_with("600519", "daily", 3)
 
     def test_no_sources_raises_governor_error(self):
-        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
+        from astock_api.source_governor import SourceGovernor, GovernorUnsupportedError
 
         g = SourceGovernor()
-        with pytest.raises(GovernorUnavailableError, match="all sources unavailable"):
+        with pytest.raises(GovernorUnsupportedError, match="no data available"):
             g.fetch_market_bars("600519", "daily", 3)
 
     def test_source_transient_error_becomes_governor_unavailable(self):
@@ -923,12 +923,12 @@ class TestHealthCounters:
         g.register(mock_mootdx)
         g.register(mock_baidu)
 
-        with pytest.raises(GovernorUnsupportedError, match="no source supports"):
+        with pytest.raises(GovernorUnsupportedError, match="no data available"):
             g.fetch_market_bars("872925", "daily", 3)
 
-    def test_data_plus_unsupported_becomes_unavailable(self):
-        """Scenario C: DataError + Unsupported → GovernorUnavailableError."""
-        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
+    def test_data_plus_unsupported_becomes_unsupported(self):
+        """Scenario C: DataError + Unsupported → GovernorUnsupportedError (no transient errors = no data)."""
+        from astock_api.source_governor import SourceGovernor, GovernorUnsupportedError
 
         mock_mootdx = MagicMock()
         mock_mootdx.name = "mootdx"
@@ -942,7 +942,7 @@ class TestHealthCounters:
         g.register(mock_mootdx)
         g.register(mock_baidu)
 
-        with pytest.raises(GovernorUnavailableError, match="all sources unavailable"):
+        with pytest.raises(GovernorUnsupportedError, match="no data available"):
             g.fetch_market_bars("872925", "daily", 3)
 
     def test_transient_plus_data_becomes_unavailable(self):
@@ -1251,7 +1251,7 @@ class TestHalfOpen:
 
     def test_half_open_data_error_closes(self):
         """D. HALF_OPEN DataError → CLOSED (source reachable, data issue is not health concern)."""
-        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
+        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError, GovernorUnsupportedError
 
         mock_source = MagicMock()
         mock_source.name = "mootdx"
@@ -1272,7 +1272,8 @@ class TestHalfOpen:
 
         g.now_fn = lambda: 1030.0
 
-        with pytest.raises(GovernorUnavailableError):
+        # DataError only → GovernorUnsupportedError (no transient errors)
+        with pytest.raises(GovernorUnsupportedError):
             g.fetch_market_bars("600519", "daily", 3)
 
         # DataError does NOT trigger OPEN — source reached, data issue is not a health concern.
