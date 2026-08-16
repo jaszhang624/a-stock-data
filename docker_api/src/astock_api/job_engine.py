@@ -527,13 +527,23 @@ class JobEngine:
                     conn.rollback()
                     return None
 
-                # WAITING_SOURCE: only claim due RETRY chunks, never PENDING
+                # WAITING_SOURCE: claim due RETRY chunks AND PENDING chunks.
+                # PENDING chunks don't depend on baidu; only RETRY chunks that hit baidu OPEN need to wait.
+                # Try RETRY first (due), then PENDING.
                 if job_status == JOB_WAITING_SOURCE:
                     row = conn.execute("""
                         SELECT chunk_id FROM job_chunks
                         WHERE job_id=? AND status='RETRY' AND (next_retry_at IS NULL OR next_retry_at <= ?)
                         ORDER BY created_at ASC LIMIT 1
                     """, (job_id, now)).fetchone()
+
+                    if not row:
+                        # Fall back to PENDING chunks (they don't depend on baidu)
+                        row = conn.execute("""
+                            SELECT chunk_id FROM job_chunks
+                            WHERE job_id=? AND status='PENDING'
+                            ORDER BY created_at ASC LIMIT 1
+                        """, (job_id, now)).fetchone()
 
                     if not row:
                         conn.rollback()
@@ -543,7 +553,7 @@ class JobEngine:
 
                     # Atomic: claim chunk + transition job in same transaction
                     updated = conn.execute(
-                        "UPDATE job_chunks SET status=?, started_at=?, updated_at=? WHERE chunk_id=? AND status='RETRY'",
+                        "UPDATE job_chunks SET status=?, started_at=?, updated_at=? WHERE chunk_id=? AND status IN ('RETRY','PENDING')",
                         (CHUNK_RUNNING, now, now, chunk_id)
                     ).rowcount
 
