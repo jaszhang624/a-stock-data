@@ -161,13 +161,15 @@ class BaiduSource(MarketBarsSource):
         result = raw.get("Result")
         if not isinstance(result, dict):
             raise SourceDataError(
-                f"baidu returned malformed Result for {symbol}: {type(result).__name__}"
+                f"baidu returned malformed Result for {symbol}: {type(result).__name__}",
+                definitive=False  # Malformed response might be transient
             )
 
         md = result.get("newMarketData")
         if not isinstance(md, dict):
             raise SourceDataError(
-                f"baidu missing newMarketData for {symbol}"
+                f"baidu missing newMarketData for {symbol}",
+                definitive=False  # Malformed response might be transient
             )
 
         keys = md.get("keys", [])

@@ -947,7 +947,7 @@ class TestHealthCounters:
             g.fetch_market_bars("872925", "daily", 3)
 
     def test_transient_plus_data_becomes_unavailable(self):
-        """Scenario D: Transient + DataError → GovernorUnavailableError."""
+        """Scenario D: Transient + DataError (definitive=False) → GovernorUnavailableError."""
         from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
 
         mock_mootdx = MagicMock()
@@ -956,7 +956,7 @@ class TestHealthCounters:
 
         mock_baidu = MagicMock()
         mock_baidu.name = "baidu"
-        mock_baidu.fetch_market_bars.side_effect = SourceDataError("malformed")
+        mock_baidu.fetch_market_bars.side_effect = SourceDataError("malformed", definitive=False)
 
         g = SourceGovernor()
         g.register(mock_mootdx)
