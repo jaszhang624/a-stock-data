@@ -229,7 +229,7 @@ class SourceGovernor:
                 errors.append(e)
 
         # All sources failed — distinguish unsupported vs unavailable.
-        # GovernorUnsupportedError if ALL errors are non-transient (unsupported or data errors).
+        # GovernorUnsupportedError if ALL errors are non-transient (unsupported or definitive data errors).
         # Only GovernorUnavailableError if at least one source returned a transient error.
         has_transient = any(
             isinstance(e, SourceTransientError) for e in errors
@@ -238,6 +238,21 @@ class SourceGovernor:
         if not has_transient:
             # All sources returned unsupported or data errors — symbol simply has no data.
             # This is a permanent condition; retrying will not help.
+            raise GovernorUnsupportedError(
+                f"no data available for symbol {symbol}: {[str(e) for e in errors]}",
+                source_errors=errors,
+            )
+
+        # Has transient errors — check if any source gave a definitive "no data" answer.
+        # If mootdx says EMPTY (definitive) and baidu is OPEN (transient),
+        # the mootdx answer is authoritative; don't retry.
+        has_definitive_no_data = any(
+            isinstance(e, SourceDataError) and getattr(e, 'definitive', True) for e in errors
+        )
+
+        if has_definitive_no_data:
+            # At least one source confirmed no data. Transient errors from other sources
+            # (e.g., baidu OPEN) don't change the fact that data doesn't exist.
             raise GovernorUnsupportedError(
                 f"no data available for symbol {symbol}: {[str(e) for e in errors]}",
                 source_errors=errors,

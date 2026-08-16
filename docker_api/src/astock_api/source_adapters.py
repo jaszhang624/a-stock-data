@@ -23,7 +23,17 @@ class SourceUnsupportedError(SourceError):
 
 
 class SourceDataError(SourceError):
-    """Malformed response, missing columns, empty data."""
+    """Malformed response, missing columns, empty data.
+
+    Args:
+        message: Error description.
+        definitive: If True, the source gave a definitive answer (e.g., empty data).
+                   If False, the error might be transient (e.g., malformed response).
+    """
+
+    def __init__(self, message: str, definitive: bool = True):
+        super().__init__(message)
+        self.definitive = definitive
 
 
 # ── Protocol ────────────────────────────────────────────────────────
