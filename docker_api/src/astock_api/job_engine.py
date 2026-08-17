@@ -543,7 +543,7 @@ class JobEngine:
                             SELECT chunk_id FROM job_chunks
                             WHERE job_id=? AND status='PENDING'
                             ORDER BY created_at ASC LIMIT 1
-                        """, (job_id, now)).fetchone()
+                        """, (job_id,)).fetchone()
 
                     if not row:
                         conn.rollback()
