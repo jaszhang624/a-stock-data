@@ -768,12 +768,13 @@ class JobEngine:
             now = self._now_iso()
 
             if status == JOB_WAITING_SOURCE:
-                # Only runnable if RETRY chunk is due now
-                retry_due = conn.execute("""
+                # Runnable if RETRY chunk is due now OR PENDING chunks exist.
+                # R5-B: PENDING chunks don't depend on baidu; they can proceed.
+                runnable = conn.execute("""
                     SELECT COUNT(*) FROM job_chunks
-                    WHERE job_id=? AND status='RETRY' AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                    WHERE job_id=? AND (status='PENDING' OR (status='RETRY' AND (next_retry_at IS NULL OR next_retry_at <= ?)))
                 """, (job_id, now)).fetchone()[0]
-                return retry_due > 0
+                return runnable > 0
 
             # PENDING or RUNNING: only runnable if there are executable chunks
             # (PENDING chunk OR due RETRY chunk)
