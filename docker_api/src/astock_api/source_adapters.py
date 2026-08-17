@@ -103,7 +103,8 @@ class MootdxSource(MarketBarsSource):
         missing = [c for c in columns if c not in df.columns]
         if missing:
             raise SourceDataError(
-                f"mootdx bars schema missing columns: {','.join(missing)}"
+                f"mootdx bars schema missing columns: {','.join(missing)}",
+                definitive=False  # Malformed response might be transient
             )
 
         rows = df.tail(count)[columns].to_dict(orient="records")

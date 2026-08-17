@@ -244,20 +244,9 @@ class SourceGovernor:
             )
 
         # Has transient errors — check if any source gave a definitive "no data" answer.
-        # If mootdx says EMPTY (definitive) and baidu is OPEN (transient),
-        # the mootdx answer is authoritative; don't retry.
-        has_definitive_no_data = any(
-            isinstance(e, SourceDataError) and getattr(e, 'definitive', True) for e in errors
-        )
-
-        if has_definitive_no_data:
-            # At least one source confirmed no data. Transient errors from other sources
-            # (e.g., baidu OPEN) don't change the fact that data doesn't exist.
-            raise GovernorUnsupportedError(
-                f"no data available for symbol {symbol}: {[str(e) for e in errors]}",
-                source_errors=errors,
-            )
-
+        # mootdx EMPTY (definitive) + baidu OPEN → GovernorUnavailableError (WAITING_SOURCE).
+        # The mootdx answer is authoritative, but baidu OPEN means we haven't checked baidu yet.
+        # Don't permanently fail; wait for baidu cooldown to expire and retry.
         raise GovernorUnavailableError(
             f"all sources unavailable for {symbol}: {[str(e) for e in errors]}",
             source_errors=errors,
