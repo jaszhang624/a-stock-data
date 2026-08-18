@@ -700,10 +700,23 @@ class JobEngine:
             conn.close()
 
     def _recover_state(self):
-        """Recover state after crash: RUNNING chunks → RETRY, RUNNING jobs → PENDING."""
+        """Recover state after crash: RUNNING chunks → RETRY, RUNNING jobs → PENDING.
+
+        R5-C1: Also terminalize stranded RETRY chunks where retry_count >= MAX_RETRIES.
+        These are illegal states that should never exist but can occur from prior bugs.
+        """
         conn = self._get_conn()
         try:
             now = self._now_iso()
+
+            # R5-C1: Terminalize stranded RETRY chunks (retry_count >= MAX_RETRIES)
+            # These are illegal states — the chunk should have been FAILED, not RETRY.
+            # Idempotent: safe to run on every startup.
+            conn.execute(
+                "UPDATE job_chunks SET status=?, next_retry_at=NULL, finished_at=?, updated_at=? "
+                "WHERE status=? AND retry_count >= ?",
+                (CHUNK_FAILED, now, now, CHUNK_RETRY, MAX_RETRIES)
+            )
 
             # RUNNING chunks → RETRY (but will skip if result file exists)
             conn.execute(
@@ -815,6 +828,11 @@ class JobEngine:
                 # r4: Do NOT transition WAITING_SOURCE here.
                 # _claim_chunk() will do it atomically in the same transaction as chunk claim.
                 return True  # Allow proceeding to _claim_chunk
+            elif current == JOB_RUNNING:
+                # Already running — allow proceeding to _claim_chunk.
+                # R5-C1: Without this, RUNNING jobs are skipped entirely,
+                # causing RETRY chunks to become stranded (never claimed).
+                return True
             else:
                 # PAUSED, CANCELLED, DONE, FAILED — don't override
                 return False

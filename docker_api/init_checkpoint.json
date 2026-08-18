@@ -1,0 +1,212 @@
+{
+  "phases": {
+    "A": {
+      "status": "PASS",
+      "counts": {
+        "SUCCESS": 13,
+        "UPSTREAM_BLOCKED": 3,
+        "APPLICATION_ERROR": 3,
+        "PARSER_ERROR": 6
+      },
+      "results": [
+        {
+          "type": "market_bars_snapshot",
+          "symbol": "600519",
+          "status": "DONE",
+          "error_detail": null,
+          "elapsed": 5.1
+        },
+        {
+          "type": "market_bars_snapshot",
+          "symbol": "000001",
+          "status": "DONE",
+          "error_detail": null,
+          "elapsed": 5.1
+        },
+        {
+          "type": "market_bars_snapshot",
+          "symbol": "300750",
+          "status": "DONE",
+          "error_detail": null,
+          "elapsed": 5.1
+        },
+        {
+          "type": "tencent_quote",
+          "symbols": [
+            "600519",
+            "000001",
+            "300750"
+          ],
+          "status": "SUCCESS",
+          "result_size": 4,
+          "elapsed": 0.2
+        },
+        {
+          "type": "eastmoney_stock_info",
+          "symbol": "600519",
+          "status": "UPSTREAM_BLOCKED",
+          "result_size": 0,
+          "elapsed": 0.1
+        },
+        {
+          "type": "eastmoney_stock_info",
+          "symbol": "000001",
+          "status": "UPSTREAM_BLOCKED",
+          "result_size": 0,
+          "elapsed": 1.6
+        },
+        {
+          "type": "eastmoney_stock_info",
+          "symbol": "300750",
+          "status": "UPSTREAM_BLOCKED",
+          "result_size": 0,
+          "elapsed": 1.5
+        },
+        {
+          "type": "baidu_kline_with_ma",
+          "symbol": "600519",
+          "status": "SUCCESS",
+          "result_size": 4,
+          "elapsed": 0.2
+        },
+        {
+          "type": "baidu_kline_with_ma",
+          "symbol": "000001",
+          "status": "SUCCESS",
+          "result_size": 4,
+          "elapsed": 0.1
+        },
+        {
+          "type": "baidu_kline_with_ma",
+          "symbol": "300750",
+          "status": "SUCCESS",
+          "result_size": 4,
+          "elapsed": 0.1
+        },
+        {
+          "type": "full_valuation",
+          "symbol": "600519",
+          "status": "APPLICATION_ERROR",
+          "result_size": 0,
+          "elapsed": 0.4
+        },
+        {
+          "type": "full_valuation",
+          "symbol": "000001",
+          "status": "APPLICATION_ERROR",
+          "result_size": 0,
+          "elapsed": 0.4
+        },
+        {
+          "type": "full_valuation",
+          "symbol": "300750",
+          "status": "APPLICATION_ERROR",
+          "result_size": 0,
+          "elapsed": 0.4
+        },
+        {
+          "type": "sina_financial_report",
+          "symbol": "600519",
+          "report_type": "lrb",
+          "status": "SUCCESS",
+          "result_size": 0,
+          "elapsed": 0.1
+        },
+        {
+          "type": "sina_financial_report",
+          "symbol": "600519",
+          "report_type": "xjllb",
+          "status": "PARSER_ERROR",
+          "result_size": 0,
+          "elapsed": 0.1
+        },
+        {
+          "type": "sina_financial_report",
+          "symbol": "600519",
+          "report_type": "fzbb",
+          "status": "PARSER_ERROR",
+          "result_size": 0,
+          "elapsed": 0.2
+        },
+        {
+          "type": "sina_financial_report",
+          "symbol": "000001",
+          "report_type": "lrb",
+          "status": "SUCCESS",
+          "result_size": 0,
+          "elapsed": 0.2
+        },
+        {
+          "type": "sina_financial_report",
+          "symbol": "000001",
+          "report_type": "xjllb",
+          "status": "PARSER_ERROR",
+          "result_size": 0,
+          "elapsed": 0.3
+        },
+        {
+          "type": "sina_financial_report",
+          "symbol": "000001",
+          "report_type": "fzbb",
+          "status": "PARSER_ERROR",
+          "result_size": 0,
+          "elapsed": 0.3
+        },
+        {
+          "type": "sina_financial_report",
+          "symbol": "300750",
+          "report_type": "lrb",
+          "status": "SUCCESS",
+          "result_size": 0,
+          "elapsed": 0.1
+        },
+        {
+          "type": "sina_financial_report",
+          "symbol": "300750",
+          "report_type": "xjllb",
+          "status": "PARSER_ERROR",
+          "result_size": 0,
+          "elapsed": 0.2
+        },
+        {
+          "type": "sina_financial_report",
+          "symbol": "300750",
+          "report_type": "fzbb",
+          "status": "PARSER_ERROR",
+          "result_size": 0,
+          "elapsed": 0.3
+        },
+        {
+          "type": "cninfo_announcements",
+          "symbol": "600519",
+          "status": "SUCCESS",
+          "result_size": 0,
+          "elapsed": 0.2
+        },
+        {
+          "type": "cninfo_announcements",
+          "symbol": "000001",
+          "status": "SUCCESS",
+          "result_size": 0,
+          "elapsed": 0.2
+        },
+        {
+          "type": "cninfo_announcements",
+          "symbol": "300750",
+          "status": "SUCCESS",
+          "result_size": 0,
+          "elapsed": 1.3
+        }
+      ],
+      "completed_at": "2026-08-12T13:51:25.827115+00:00"
+    },
+    "B": {
+      "status": "BLOCKED",
+      "reason": "no validated security-master/universe endpoint in API",
+      "gap": "API capability gap — need a function that returns stock list without requiring codes as input",
+      "completed_at": "2026-08-12T13:51:56.369718+00:00"
+    }
+  },
+  "universe": null,
+  "started_at": "2026-08-12T13:51:03.166014+00:00"
+}

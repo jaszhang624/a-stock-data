@@ -374,6 +374,205 @@ class TestJobEngine:
         chunks = engine.get_chunks(result["job_id"])
         assert chunks[0]["status"] == "FAILED"
 
+    def test_13b_retry_exhaustion_terminalization(self):
+        """TEST 13b: retry_count = MAX_RETRIES - 1, next transient → FAILED (not RETRY)."""
+        from astock_api.job_engine import JobEngine, TransientJobError, MAX_RETRIES
+
+        def mock_handler(payload):
+            raise TransientJobError("Persistent failure")
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        # Execute until retry_count = MAX_RETRIES - 1
+        for i in range(MAX_RETRIES - 1):
+            conn = engine._get_conn()
+            try:
+                now = engine._now_iso()
+                conn.execute("UPDATE job_chunks SET next_retry_at=? WHERE status='RETRY'", (now,))
+                conn.commit()
+            finally:
+                conn.close()
+
+            chunk = engine._claim_chunk(result["job_id"])
+            assert chunk is not None, f"Should claim chunk on iteration {i}"
+            engine._execute_chunk(chunk, mock_handler)
+
+        # Verify retry_count = MAX_RETRIES - 1 and status = RETRY
+        chunks = engine.get_chunks(result["job_id"])
+        assert chunks[0]["status"] == "RETRY"
+        assert chunks[0]["retry_count"] == MAX_RETRIES - 1
+
+        # One more transient failure → must go to FAILED, not RETRY
+        conn = engine._get_conn()
+        try:
+            now = engine._now_iso()
+            conn.execute("UPDATE job_chunks SET next_retry_at=? WHERE status='RETRY'", (now,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        chunk = engine._claim_chunk(result["job_id"])
+        assert chunk is not None
+        engine._execute_chunk(chunk, mock_handler)
+
+        # Must be FAILED now — no more RETRY
+        chunks = engine.get_chunks(result["job_id"])
+        assert chunks[0]["status"] == "FAILED"
+        assert chunks[0]["retry_count"] >= MAX_RETRIES
+
+    def test_13c_stranded_retry_recovery(self):
+        """TEST 13c: status=RETRY + retry_count >= MAX_RETRIES → startup reconciliation → FAILED."""
+        from astock_api.job_engine import JobEngine, MAX_RETRIES
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        # Simulate a stranded RETRY chunk (illegal state)
+        conn = engine._get_conn()
+        try:
+            now = engine._now_iso()
+            chunk_id = conn.execute("SELECT chunk_id FROM job_chunks WHERE job_id=?", (result["job_id"],)).fetchone()[0]
+            conn.execute(
+                "UPDATE job_chunks SET status='RETRY', retry_count=?, next_retry_at=? WHERE chunk_id=?",
+                (MAX_RETRIES, now, chunk_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Verify stranded state exists
+        chunks = engine.get_chunks(result["job_id"])
+        assert chunks[0]["status"] == "RETRY"
+        assert chunks[0]["retry_count"] == MAX_RETRIES
+
+        # Simulate startup recovery
+        engine._recover_state()
+
+        # Stranded RETRY must be terminalized to FAILED
+        chunks = engine.get_chunks(result["job_id"])
+        assert chunks[0]["status"] == "FAILED"
+        assert chunks[0]["next_retry_at"] is None
+
+    def test_13d_job_terminal_on_exhaustion(self):
+        """TEST 13d: Job with all chunks DONE/FAILED (including exhausted) → Job terminal."""
+        from astock_api.job_engine import JobEngine, TransientJobError, MAX_RETRIES
+
+        def mock_handler(payload):
+            raise TransientJobError("Persistent failure")
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        # Exhaust all retries
+        for _ in range(MAX_RETRIES + 1):
+            conn = engine._get_conn()
+            try:
+                now = engine._now_iso()
+                conn.execute("UPDATE job_chunks SET next_retry_at=? WHERE status='RETRY'", (now,))
+                conn.commit()
+            finally:
+                conn.close()
+
+            chunk = engine._claim_chunk(result["job_id"])
+            if not chunk:
+                break
+            engine._execute_chunk(chunk, mock_handler)
+
+        # Job must be terminal (FAILED), not RUNNING
+        job = engine.get_job(result["job_id"])
+        assert job["status"] == "FAILED", f"Job should be FAILED, not {job['status']}"
+
+    def test_13e_running_job_transition_allowed(self):
+        """TEST 13e: RUNNING job must pass _try_transition_to_running (R5-C1 fix)."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        # Transition to RUNNING
+        conn = engine._get_conn()
+        try:
+            now = engine._now_iso()
+            conn.execute("UPDATE jobs SET status='RUNNING' WHERE job_id=?", (result["job_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+
+        # RUNNING job must be allowed to proceed (R5-C1 fix)
+        assert engine._try_transition_to_running(result["job_id"]) is True
+
+    def test_13f_two_jobs_one_exhausted_other_runs(self):
+        """TEST 13f: Two jobs, one exhausted → other job still schedulable."""
+        from astock_api.job_engine import JobEngine, TransientJobError, MAX_RETRIES
+
+        def mock_handler(payload):
+            raise TransientJobError("Persistent failure")
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        # Job A: will be exhausted
+        job_a = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        # Job B: normal
+        job_b = engine.create_job("market_bars_snapshot", {
+            "symbols": ["000001"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        # Exhaust Job A
+        for _ in range(MAX_RETRIES + 1):
+            conn = engine._get_conn()
+            try:
+                now = engine._now_iso()
+                conn.execute("UPDATE job_chunks SET next_retry_at=? WHERE status='RETRY'", (now,))
+                conn.commit()
+            finally:
+                conn.close()
+
+            chunk = engine._claim_chunk(job_a["job_id"])
+            if not chunk:
+                break
+            engine._execute_chunk(chunk, mock_handler)
+
+        # Job A should be terminal
+        job_a_status = engine.get_job(job_a["job_id"])["status"]
+        assert job_a_status in ("FAILED", "DONE"), f"Job A should be terminal, not {job_a_status}"
+
+        # Job B must still be claimable
+        chunk_b = engine._claim_chunk(job_b["job_id"])
+        assert chunk_b is not None, "Job B should be claimable while Job A is exhausted"
+
     def test_14_permanent_failure_no_retry(self):
         """TEST 14: Permanent errors go directly to FAILED."""
         from astock_api.job_engine import JobEngine, PermanentJobError
