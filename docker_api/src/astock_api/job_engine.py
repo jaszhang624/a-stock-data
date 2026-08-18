@@ -626,16 +626,15 @@ class JobEngine:
             data = handler_func(payload)
         except TransientJobError as e:
             retry_count = chunk.get("retry_count", 0) or 0
-            if retry_count + 1 < MAX_RETRIES:
+            if retry_count >= MAX_RETRIES - 1:
+                # Already failed MAX_RETRIES-1 times — this is the last attempt.
+                # Terminalize to FAILED with retry_count=MAX_RETRIES (atomic).
+                self._mark_chunk_exhausted(chunk["chunk_id"], job_id, str(e))
+            else:
                 # Still have retries left — mark RETRY with backoff.
-                # retry_count tracks how many times this chunk has already failed.
-                # After incrementing, it will be retry_count+1 (still < MAX_RETRIES).
                 backoff = RETRY_BACKOFFS[retry_count] if retry_count < len(RETRY_BACKOFFS) else RETRY_BACKOFFS[-1]
                 next_retry = (datetime.now(timezone.utc) + timedelta(seconds=backoff)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                 self._mark_chunk_retry(chunk["chunk_id"], job_id, retry_count + 1, next_retry, str(e))
-            else:
-                # Next increment would reach MAX_RETRIES — terminalize to FAILED.
-                self._mark_chunk_failed(chunk["chunk_id"], job_id, str(e))
             return "transient"  # Signal caller to stop processing this job
         except PermanentJobError as e:
             self._mark_chunk_failed(chunk["chunk_id"], job_id, str(e))
@@ -703,6 +702,27 @@ class JobEngine:
         finally:
             conn.close()
 
+    def _mark_chunk_exhausted(self, chunk_id: str, job_id: str, error: str):
+        """Terminalize a chunk that has exhausted all retries.
+
+        Atomic single-transaction update: sets status=FAILED, retry_count=MAX_RETRIES,
+        clears next_retry_at, and records finished_at. Then recomputes job counters.
+
+        retry_count semantics: counts transient failures already occurred.
+        When this is called, the chunk has failed MAX_RETRIES times total.
+        """
+        conn = self._get_conn()
+        try:
+            now = self._now_iso()
+            conn.execute(
+                "UPDATE job_chunks SET status=?, last_error=?, retry_count=?, next_retry_at=NULL, finished_at=?, updated_at=? WHERE chunk_id=?",
+                (CHUNK_FAILED, error, MAX_RETRIES, now, now, chunk_id)
+            )
+            self._recompute_job_counters_in_conn(conn, job_id)
+            conn.commit()
+        finally:
+            conn.close()
+
     def _recover_state(self):
         """Recover state after crash: RUNNING chunks → RETRY, RUNNING jobs → PENDING.
 
@@ -715,12 +735,16 @@ class JobEngine:
 
             # R5-C1: Terminalize stranded RETRY chunks (retry_count >= MAX_RETRIES)
             # These are illegal states — the chunk should have been FAILED, not RETRY.
-            # Idempotent: safe to run on every startup.
-            conn.execute(
-                "UPDATE job_chunks SET status=?, next_retry_at=NULL, finished_at=?, updated_at=? "
-                "WHERE status=? AND retry_count >= ?",
-                (CHUNK_FAILED, now, now, CHUNK_RETRY, MAX_RETRIES)
-            )
+            # Idempotent: safe to run on every startup. No upstream calls needed.
+            stranded = conn.execute(
+                "SELECT chunk_id, job_id FROM job_chunks WHERE status=? AND retry_count >= ?",
+                (CHUNK_RETRY, MAX_RETRIES)
+            ).fetchall()
+            for (cid, jid,) in stranded:
+                conn.execute(
+                    "UPDATE job_chunks SET status=?, last_error=?, retry_count=?, next_retry_at=NULL, finished_at=?, updated_at=? WHERE chunk_id=?",
+                    (CHUNK_FAILED, "TRANSIENT_EXHAUSTED", MAX_RETRIES, now, now, cid)
+                )
 
             # RUNNING chunks → RETRY (but will skip if result file exists)
             conn.execute(
