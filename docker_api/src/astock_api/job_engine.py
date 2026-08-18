@@ -172,6 +172,11 @@ class JobEngine:
         finally:
             conn.close()
 
+        # R5-C3: Recover state on startup — orphan RUNNING → PENDING,
+        # stranded RETRY → FAILED, recompute job counters from durable chunk states.
+        # Idempotent: safe to call multiple times (initialize + start).
+        self._recover_state()
+
     def _now_iso(self):
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -827,10 +832,14 @@ class JobEngine:
                     (CHUNK_FAILED, "TRANSIENT_EXHAUSTED", MAX_RETRIES, now, now, cid)
                 )
 
-            # RUNNING chunks → RETRY (but will skip if result file exists)
+            # R5-C3: Orphan RUNNING chunks → PENDING (do NOT consume retry budget).
+            # Process crash ≠ upstream transient failure. The chunk's source checkpoints
+            # and next_source are preserved — on restart, the handler resumes from
+            # the saved position (e.g., baidu after mootdx EMPTY). If no checkpoint exists,
+            # the chunk re-executes from scratch (at-least-once semantics).
             conn.execute(
-                "UPDATE job_chunks SET status=?, next_retry_at=?, updated_at=? WHERE status=?",
-                (CHUNK_RETRY, now, now, CHUNK_RUNNING)
+                "UPDATE job_chunks SET status=?, updated_at=? WHERE status=?",
+                (CHUNK_PENDING, now, CHUNK_RUNNING)
             )
 
             # RUNNING jobs → PENDING (WAITING_SOURCE stays; PAUSED/CANCELLED/DONE/FAILED stay)
@@ -838,7 +847,8 @@ class JobEngine:
                 "UPDATE jobs SET status=? WHERE status=?", (JOB_PENDING, JOB_RUNNING)
             )
 
-            # Recompute all job counters in same connection
+            # R5-C3: Recompute job status from durable chunk states.
+            # Prevents stale job status after crash (e.g., all chunks terminal but job still RUNNING).
             jobs = conn.execute("SELECT job_id FROM jobs").fetchall()
             for (jid,) in jobs:
                 self._recompute_job_counters_in_conn(conn, jid)

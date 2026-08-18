@@ -110,10 +110,6 @@ def market_bars_sync_handler(payload: dict):
     except Exception as e:
         raise TransientJobError(f"source governor failed for {symbol}: {e}") from e
 
-    # R5-C2: save checkpoint for successful source
-    if chunk_id and isinstance(result, dict):
-        _save_source_checkpoint(chunk_id, result.get("source", "unknown"), "DATA_OK")
-
     # Step 2: Normalize to canonical format
     security_id = DatasetStore.make_security_id(symbol)
 
@@ -141,6 +137,12 @@ def market_bars_sync_handler(payload: dict):
 
     # Write bars with crash-safe transaction (BEGIN → UPSERT → COMMIT)
     store.write_market_bars(security_id, bars, 'mootdx', payload.get('job_id', ''))
+
+    # R5-C3: DATA_OK checkpoint AFTER DuckDB commit — prevents data loss if crash
+    # occurs between source fetch and DuckDB write. If crash happens in the window,
+    # restart will re-fetch + idempotent UPSERT (at-least-once semantics).
+    if chunk_id and isinstance(result, dict):
+        _save_source_checkpoint(chunk_id, result.get("source", "unknown"), "DATA_OK")
 
     return {"security_id": security_id, "bars_count": len(bars)}
 
