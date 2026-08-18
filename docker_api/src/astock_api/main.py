@@ -155,6 +155,11 @@ async def lifespan(app: FastAPI):
         engine.stop()
 
 
+def get_engine():
+    """Return the job engine instance from app state."""
+    return getattr(app.state, "job_engine", None)
+
+
 # ── App ──────────────────────────────────────────────────────────────
 app = FastAPI(
     title="A-Stock Data API",

@@ -58,7 +58,7 @@ class TestJobEngine:
 
             # Check PRAGMA user_version
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            assert version == 1
+            assert version == 2
         finally:
             conn.close()
 
@@ -1520,6 +1520,366 @@ class TestR2Regression:
             if engine._is_job_runnable(jid):
                 assert jid == job_b["job_id"], f"Should pick Job B, not {jid}"
                 break
+
+    # ── R5-C2: Source Checkpoint Tests (deterministic fixture) ───────
+
+    def test_19_checkpoint_save_and_read(self):
+        """TEST 19: Source checkpoint save and read."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk = engine._claim_chunk(result["job_id"])
+        cid = chunk["chunk_id"]
+
+        # Save mootdx EMPTY checkpoint
+        engine._save_source_checkpoint(cid, "mootdx", "EMPTY", completed=True)
+
+        # Read back
+        cps = engine._get_source_checkpoints(cid)
+        assert len(cps) == 1
+        assert cps[0]["provider"] == "mootdx"
+        assert cps[0]["outcome"] == "EMPTY"
+        assert cps[0]["completed"] is True
+
+    def test_20_checkpoint_idempotent(self):
+        """TEST 20: Duplicate checkpoint write is idempotent."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk = engine._claim_chunk(result["job_id"])
+        cid = chunk["chunk_id"]
+
+        # Write same checkpoint twice
+        engine._save_source_checkpoint(cid, "mootdx", "EMPTY", completed=True)
+        engine._save_source_checkpoint(cid, "mootdx", "EMPTY", completed=True)
+
+        # Should still be one row
+        cps = engine._get_source_checkpoints(cid)
+        assert len(cps) == 1
+        # attempt_count should increment on upsert
+        assert cps[0]["attempt_count"] == 2
+
+    def test_21_checkpoint_next_source(self):
+        """TEST 21: next_source persistence."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk = engine._claim_chunk(result["job_id"])
+        cid = chunk["chunk_id"]
+
+        # Save mootdx EMPTY, set next_source=baidu
+        engine._save_source_checkpoint(cid, "mootdx", "EMPTY", completed=True)
+        engine._set_next_source(cid, "baidu")
+
+        # Verify next_source persisted
+        conn = engine._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT next_source FROM job_chunks WHERE chunk_id=?", (cid,)
+            ).fetchone()
+            assert row[0] == "baidu"
+        finally:
+            conn.close()
+
+    def test_22_checkpoint_multiple_providers(self):
+        """TEST 22: Multiple provider checkpoints for same chunk."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk = engine._claim_chunk(result["job_id"])
+        cid = chunk["chunk_id"]
+
+        # mootdx EMPTY, baidu DATA_OK
+        engine._save_source_checkpoint(cid, "mootdx", "EMPTY", completed=True)
+        engine._save_source_checkpoint(cid, "baidu", "DATA_OK", completed=True)
+
+        cps = engine._get_source_checkpoints(cid)
+        assert len(cps) == 2
+        providers = {c["provider"]: c for c in cps}
+        assert providers["mootdx"]["outcome"] == "EMPTY"
+        assert providers["baidu"]["outcome"] == "DATA_OK"
+
+    def test_23_checkpoint_transient_not_completed(self):
+        """TEST 23: Transient errors are NOT marked completed."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk = engine._claim_chunk(result["job_id"])
+        cid = chunk["chunk_id"]
+
+        # Transient error — not completed
+        engine._save_source_checkpoint(cid, "mootdx", "TRANSIENT", completed=False, error="timeout")
+
+        cps = engine._get_source_checkpoints(cid)
+        assert len(cps) == 1
+        assert cps[0]["completed"] is False
+        assert "timeout" in cps[0]["last_error"]
+
+    def test_24_checkpoint_concurrent_isolation(self):
+        """TEST 24: Checkpoint state isolation between chunks/jobs."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        job_a = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        job_b = engine.create_job("market_bars_snapshot", {
+            "symbols": ["000001"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk_a = engine._claim_chunk(job_a["job_id"])
+        chunk_b = engine._claim_chunk(job_b["job_id"])
+
+        # Save checkpoint for job A only
+        engine._save_source_checkpoint(chunk_a["chunk_id"], "mootdx", "EMPTY", completed=True)
+
+        # Job B should have no checkpoints
+        cps_b = engine._get_source_checkpoints(chunk_b["chunk_id"])
+        assert len(cps_b) == 0
+
+    def test_25_checkpoint_restart_persistence(self):
+        """TEST 25: Checkpoint survives engine re-initialization (simulates restart)."""
+        from astock_api.job_engine import JobEngine
+
+        # Phase 1: Create engine, save checkpoint
+        db_path = os.path.join(self.data_dir, "astock_jobs.db")
+        engine1 = JobEngine(db_path=db_path, data_dir=self.data_dir)
+        engine1.initialize()
+
+        result = engine1.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk = engine1._claim_chunk(result["job_id"])
+        cid = chunk["chunk_id"]
+
+        engine1._save_source_checkpoint(cid, "mootdx", "EMPTY", completed=True)
+        engine1._set_next_source(cid, "baidu")
+
+        # Phase 2: New engine instance (simulates restart)
+        engine2 = JobEngine(db_path=db_path, data_dir=self.data_dir)
+        engine2.initialize()
+
+        # Checkpoint must persist
+        cps = engine2._get_source_checkpoints(cid)
+        assert len(cps) == 1
+        assert cps[0]["provider"] == "mootdx"
+        assert cps[0]["outcome"] == "EMPTY"
+
+        # next_source must persist
+        conn = engine2._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT next_source FROM job_chunks WHERE chunk_id=?", (cid,)
+            ).fetchone()
+            assert row[0] == "baidu"
+        finally:
+            conn.close()
+
+    def test_26_checkpoint_terminal_chunk_no_upstream(self):
+        """TEST 26: Terminal chunk (DONE) restart produces no upstream calls."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk = engine._claim_chunk(result["job_id"])
+        cid = chunk["chunk_id"]
+
+        # Simulate: mootdx DATA_OK, chunk DONE
+        engine._save_source_checkpoint(cid, "mootdx", "DATA_OK", completed=True)
+        engine._mark_chunk_done(cid, result["job_id"], "/path/to/result.json")
+
+        # After restart, chunk should be DONE — no upstream calls
+        engine._recover_state()
+
+        conn = engine._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT status FROM job_chunks WHERE chunk_id=?", (cid,)
+            ).fetchone()
+            assert row[0] == "DONE"
+        finally:
+            conn.close()
+
+    def test_27_checkpoint_migration_from_v1(self):
+        """TEST 27: Existing DB (v1) upgrades safely to v2 with checkpoint table."""
+        from astock_api.job_engine import JobEngine
+
+        # Create a fresh DB that simulates v1 (no checkpoint table)
+        db_path = os.path.join(self.data_dir, "astock_jobs_v1.db")
+
+        # Initialize with current code (which creates v2)
+        engine = JobEngine(db_path=db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        # Verify v2 schema exists
+        conn = engine._get_conn()
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            assert version == 2
+
+            tables = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).fetchall()
+            table_names = [t[0] for t in tables]
+            assert "job_chunk_source_state" in table_names
+
+            # next_source column exists
+            columns = conn.execute("PRAGMA table_info(job_chunks)").fetchall()
+            col_names = [c[1] for c in columns]
+            assert "next_source" in col_names
+
+            # capability column exists in checkpoint table
+            cp_columns = conn.execute("PRAGMA table_info(job_chunk_source_state)").fetchall()
+            cp_col_names = [c[1] for c in cp_columns]
+            assert "capability" in cp_col_names
+        finally:
+            conn.close()
+
+    def test_28_checkpoint_crash_simulation(self):
+        """TEST 28: Crash simulation — mootdx checkpoint saved, baidu not yet started.
+        After restart, recovery should continue from baidu, not mootdx."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk = engine._claim_chunk(result["job_id"])
+        cid = chunk["chunk_id"]
+
+        # Simulate crash after mootdx EMPTY but before baidu
+        engine._save_source_checkpoint(cid, "mootdx", "EMPTY", completed=True)
+        engine._set_next_source(cid, "baidu")
+
+        # Simulate restart — new engine reads state
+        engine2 = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine2.initialize()
+
+        # Verify: mootdx is completed, next_source is baidu
+        cps = engine2._get_source_checkpoints(cid)
+        mootdx_cp = next((c for c in cps if c["provider"] == "mootdx"), None)
+        assert mootdx_cp is not None
+        assert mootdx_cp["completed"] is True
+
+        conn = engine2._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT next_source FROM job_chunks WHERE chunk_id=?", (cid,)
+            ).fetchone()
+            assert row[0] == "baidu"  # Next source is baidu, not mootdx
+        finally:
+            conn.close()
+
+    def test_29_checkpoint_both_empty_terminal(self):
+        """TEST 29: Both mootdx EMPTY and baidu EMPTY → source state shows both."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk = engine._claim_chunk(result["job_id"])
+        cid = chunk["chunk_id"]
+
+        # Both sources EMPTY
+        engine._save_source_checkpoint(cid, "mootdx", "EMPTY", completed=True)
+        engine._save_source_checkpoint(cid, "baidu", "EMPTY", completed=True)
+
+        cps = engine._get_source_checkpoints(cid)
+        assert len(cps) == 2
+        providers = {c["provider"]: c for c in cps}
+        assert providers["mootdx"]["outcome"] == "EMPTY"
+        assert providers["baidu"]["outcome"] == "EMPTY"
+
+    def test_30_checkpoint_unsupported(self):
+        """TEST 30: UNSUPPORTED outcome is completed (no retry needed)."""
+        from astock_api.job_engine import JobEngine
+
+        engine = JobEngine(db_path=self.db_path, data_dir=self.data_dir)
+        engine.initialize()
+
+        result = engine.create_job("market_bars_snapshot", {
+            "symbols": ["600519"],
+            "frequency": "daily",
+            "count": 100,
+        })
+
+        chunk = engine._claim_chunk(result["job_id"])
+        cid = chunk["chunk_id"]
+
+        engine._save_source_checkpoint(cid, "mootdx", "UNSUPPORTED", completed=True)
+
+        cps = engine._get_source_checkpoints(cid)
+        assert len(cps) == 1
+        assert cps[0]["outcome"] == "UNSUPPORTED"
+        assert cps[0]["completed"] is True
 
 
 if __name__ == '__main__':

@@ -13,6 +13,10 @@ from typing import Any
 class SourceError(Exception):
     """Base exception for all source adapter errors."""
 
+    def __init__(self, message: str, source_name: str = ""):
+        super().__init__(message)
+        self.source_name = source_name
+
 
 class SourceTransientError(SourceError):
     """Temporary failure: network error, rate limit (ResultCode=403), server down."""
@@ -31,8 +35,8 @@ class SourceDataError(SourceError):
                    If False, the error might be transient (e.g., malformed response).
     """
 
-    def __init__(self, message: str, definitive: bool = True):
-        super().__init__(message)
+    def __init__(self, message: str, definitive: bool = True, source_name: str = ""):
+        super().__init__(message, source_name=source_name)
         self.definitive = definitive
 
 

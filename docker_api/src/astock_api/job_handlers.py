@@ -16,10 +16,12 @@ def market_bars_handler(payload: dict):
     """Handle one daily market-bars snapshot chunk via SourceGovernor.
 
     payload: {"symbol": "600519", "frequency": "daily", "count": 100}
+    R5-C2: payload may include "chunk_id" for checkpoint persistence.
     """
     symbol = str(payload["symbol"])
     frequency = payload.get("frequency", "daily")
     count = int(payload.get("count", 100))
+    chunk_id = payload.get("chunk_id")
 
     if frequency != "daily":
         raise PermanentJobError(
@@ -36,10 +38,16 @@ def market_bars_handler(payload: dict):
         governor = get_governor()
         result = governor.fetch_market_bars(symbol, frequency, count)
     except GovernorUnavailableError as e:
+        # R5-C2: save checkpoints for each source error before re-raising
+        if chunk_id and e.source_errors:
+            _save_checkpoints_from_errors(chunk_id, e.source_errors)
         raise TransientJobError(
             f"all sources unavailable for {symbol}: {e}"
         ) from e
     except GovernorUnsupportedError as e:
+        # R5-C2: save checkpoints for each source error before re-raising
+        if chunk_id and e.source_errors:
+            _save_checkpoints_from_errors(chunk_id, e.source_errors)
         raise PermanentJobError(
             f"no source supports {symbol}: {e}"
         ) from e
@@ -47,6 +55,10 @@ def market_bars_handler(payload: dict):
         raise TransientJobError(
             f"source governor failed for {symbol}: {e}"
         ) from e
+
+    # R5-C2: save checkpoint for successful source
+    if chunk_id and isinstance(result, dict):
+        _save_source_checkpoint(chunk_id, result.get("source", "unknown"), "DATA_OK")
 
     return result
 
@@ -62,12 +74,14 @@ def market_bars_sync_handler(payload: dict):
     5. mark chunk DONE (Job Engine)
 
     payload: {"symbol": "600519", "frequency": "daily", "count": 100}
+    R5-C2: payload may include "chunk_id" for checkpoint persistence.
     """
     from astock_api.dataset_store import DatasetStore
 
     symbol = str(payload["symbol"])
     frequency = payload.get("frequency", "daily")
     count = int(payload.get("count", 100))
+    chunk_id = payload.get("chunk_id")
 
     if frequency != "daily":
         raise PermanentJobError(
@@ -84,11 +98,21 @@ def market_bars_sync_handler(payload: dict):
         governor = get_governor()
         result = governor.fetch_market_bars(symbol, frequency, count)
     except GovernorUnavailableError as e:
+        # R5-C2: save checkpoints for each source error before re-raising
+        if chunk_id and e.source_errors:
+            _save_checkpoints_from_errors(chunk_id, e.source_errors)
         raise TransientJobError(f"all sources unavailable for {symbol}: {e}") from e
     except GovernorUnsupportedError as e:
+        # R5-C2: save checkpoints for each source error before re-raising
+        if chunk_id and e.source_errors:
+            _save_checkpoints_from_errors(chunk_id, e.source_errors)
         raise PermanentJobError(f"no source supports {symbol}: {e}") from e
     except Exception as e:
         raise TransientJobError(f"source governor failed for {symbol}: {e}") from e
+
+    # R5-C2: save checkpoint for successful source
+    if chunk_id and isinstance(result, dict):
+        _save_source_checkpoint(chunk_id, result.get("source", "unknown"), "DATA_OK")
 
     # Step 2: Normalize to canonical format
     security_id = DatasetStore.make_security_id(symbol)
@@ -131,3 +155,44 @@ def get_handler(job_type: str):
         "security_master_snapshot": security_master_snapshot_handler,
     }
     return handlers.get(job_type)
+
+
+# ── R5-C2: Checkpoint helpers ───────────────────────────────────────
+
+from astock_api.source_adapters import (
+    SourceTransientError,
+    SourceUnsupportedError,
+    SourceDataError,
+)
+
+
+def _save_source_checkpoint(chunk_id: str, provider: str, outcome: str) -> None:
+    """Save a source checkpoint via the job engine."""
+    from astock_api.main import get_engine
+    try:
+        engine = get_engine()
+        engine._save_source_checkpoint(chunk_id, provider, outcome, completed=True)
+    except Exception:
+        pass  # Best-effort; don't fail the chunk for checkpoint issues
+
+
+def _save_checkpoints_from_errors(chunk_id: str, source_errors: list) -> None:
+    """Save checkpoints from governor source_errors.
+
+    Maps SourceError types to outcomes and determines completion status.
+    """
+    from astock_api.main import get_engine
+    try:
+        engine = get_engine()
+    except Exception:
+        return  # Best-effort
+
+    for err in source_errors:
+        if isinstance(err, SourceUnsupportedError):
+            engine._save_source_checkpoint(chunk_id, err.source_name if hasattr(err, 'source_name') else 'unknown', "UNSUPPORTED", completed=True, error=str(err))
+        elif isinstance(err, SourceDataError):
+            # definitive=True → completed; definitive=False → not completed (may retry)
+            engine._save_source_checkpoint(chunk_id, err.source_name if hasattr(err, 'source_name') else 'unknown', "DATA_ERROR", completed=err.definitive if hasattr(err, 'definitive') else True, error=str(err))
+        elif isinstance(err, SourceTransientError):
+            # Transient errors are NOT completed — the provider may succeed on retry.
+            engine._save_source_checkpoint(chunk_id, err.source_name if hasattr(err, 'source_name') else 'unknown', "TRANSIENT", completed=False, error=str(err))

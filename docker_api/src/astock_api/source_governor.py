@@ -173,9 +173,11 @@ class SourceGovernor:
 
                 if state == "HALF_OPEN":
                     # Another request is already probing — skip.
-                    errors.append(SourceTransientError(
+                    err = SourceTransientError(
                         f"{name} is HALF_OPEN (probe in progress)"
-                    ))
+                    )
+                    err.source_name = name
+                    errors.append(err)
                     continue
 
                 if state == "OPEN":
@@ -185,9 +187,11 @@ class SourceGovernor:
                         self._persist(name)
                     else:
                         # Still in cooldown — skip adapter, treat as unavailable.
-                        errors.append(SourceTransientError(
+                        err = SourceTransientError(
                             f"{name} is OPEN (consecutive_failures={health['consecutive_failures']})"
-                        ))
+                        )
+                        err.source_name = name
+                        errors.append(err)
                         continue
 
             # ── Call adapter (outside lock) ───────────────────────
@@ -203,6 +207,8 @@ class SourceGovernor:
 
             except SourceUnsupportedError as e:
                 # Unsupported does NOT count as a health failure.
+                if not e.source_name:
+                    e.source_name = name
                 with lock:
                     if health["state"] == "HALF_OPEN":
                         # Probe was unsupported — back to OPEN.
@@ -212,6 +218,8 @@ class SourceGovernor:
 
             except SourceTransientError as e:
                 # Transient error — increment consecutive failures.
+                if not e.source_name:
+                    e.source_name = name
                 with lock:
                     health["consecutive_failures"] += 1
                     if health["consecutive_failures"] >= self.OPEN_THRESHOLD:
@@ -221,6 +229,8 @@ class SourceGovernor:
 
             except SourceDataError as e:
                 # Data error — does NOT trigger circuit breaker.
+                if not e.source_name:
+                    e.source_name = name
                 with lock:
                     if health["state"] == "HALF_OPEN":
                         # Probe succeeded in reaching the source — data issue is not a health concern.

@@ -143,7 +143,31 @@ class JobEngine:
                     UNIQUE(job_id, chunk_key)
                 )
             """)
-            conn.execute("PRAGMA user_version=1")
+
+            # R5-C2: Source checkpoint table (provider x chunk)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS job_chunk_source_state (
+                    chunk_id    TEXT NOT NULL,
+                    capability  TEXT NOT NULL DEFAULT 'market_bars_daily',
+                    provider    TEXT NOT NULL,
+                    outcome     TEXT NOT NULL DEFAULT 'PENDING',
+                    completed   INTEGER NOT NULL DEFAULT 0,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error  TEXT,
+                    created_at  TEXT NOT NULL,
+                    updated_at  TEXT NOT NULL,
+                    PRIMARY KEY (chunk_id, capability, provider),
+                    FOREIGN KEY(chunk_id) REFERENCES job_chunks(chunk_id)
+                )
+            """)
+
+            # R5-C2: Add next_source column to job_chunks (nullable, safe ALTER)
+            try:
+                conn.execute("ALTER TABLE job_chunks ADD COLUMN next_source TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists (idempotent)
+
+            conn.execute("PRAGMA user_version=2")
             conn.commit()
         finally:
             conn.close()
@@ -698,6 +722,63 @@ class JobEngine:
                 (CHUNK_FAILED, error, now, now, chunk_id)
             )
             self._recompute_job_counters_in_conn(conn, job_id)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _save_source_checkpoint(self, chunk_id: str, provider: str, outcome: str, completed: bool = True, error: str | None = None, capability: str = "market_bars_daily"):
+        """Save or update source checkpoint for a chunk+capability+provider.
+
+        Atomic upsert: creates row if missing, updates if exists.
+        Idempotent: safe to call multiple times with same outcome.
+
+        Args:
+            chunk_id: Chunk identifier.
+            provider: Source name (e.g. 'mootdx', 'baidu').
+            outcome: SourceOutcome value (DATA_OK, EMPTY, UNSUPPORTED, MALFORMED_DATA, TIMEOUT, RATE_LIMIT, SERVER_ERROR).
+            completed: Whether this provider step is considered complete (not to be retried).
+            error: Optional error message for non-success outcomes.
+            capability: Capability name (e.g. 'market_bars_daily'). Default: 'market_bars_daily'.
+        """
+        conn = self._get_conn()
+        try:
+            now = self._now_iso()
+            # Upsert via INSERT ... ON CONFLICT (chunk_id, capability, provider)
+            conn.execute("""
+                INSERT INTO job_chunk_source_state (chunk_id, capability, provider, outcome, completed, attempt_count, last_error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+                ON CONFLICT(chunk_id, capability, provider) DO UPDATE SET
+                    outcome = excluded.outcome,
+                    completed = excluded.completed,
+                    attempt_count = attempt_count + 1,
+                    last_error = excluded.last_error,
+                    updated_at = excluded.updated_at
+            """, (chunk_id, capability, provider, outcome, 1 if completed else 0, error or '', now, now))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _get_source_checkpoints(self, chunk_id: str) -> list[dict]:
+        """Return all source checkpoints for a chunk."""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT capability, provider, outcome, completed, attempt_count, last_error FROM job_chunk_source_state WHERE chunk_id=? ORDER BY capability, provider",
+                (chunk_id,)
+            ).fetchall()
+            return [{"capability": r[0], "provider": r[1], "outcome": r[2], "completed": bool(r[3]), "attempt_count": r[4], "last_error": r[5]} for r in rows]
+        finally:
+            conn.close()
+
+    def _set_next_source(self, chunk_id: str, next_source: str | None):
+        """Set the next source to try for a chunk."""
+        conn = self._get_conn()
+        try:
+            now = self._now_iso()
+            conn.execute(
+                "UPDATE job_chunks SET next_source=?, updated_at=? WHERE chunk_id=?",
+                (next_source, now, chunk_id)
+            )
             conn.commit()
         finally:
             conn.close()
