@@ -90,6 +90,25 @@ class JobEngine:
         self._worker_thread = None
         self._started = False
 
+        # R5-C3: Worker observability (thread-safe via threading.Lock)
+        self._worker_lock = threading.Lock()
+        self.worker_started_at: str | None = None
+        self.worker_last_heartbeat: str | None = None
+        self.worker_iteration_count: int = 0
+        self.worker_last_error: str | None = None
+
+    def get_worker_health(self) -> dict:
+        """Return worker health status for /health/worker endpoint."""
+        with self._worker_lock:
+            return {
+                "status": "running" if self._started else "stopped",
+                "thread_alive": bool(self._worker_thread and self._worker_thread.is_alive()),
+                "started_at": self.worker_started_at,
+                "last_heartbeat": self.worker_last_heartbeat,
+                "iteration_count": self.worker_iteration_count,
+                "last_error": self.worker_last_error,
+            }
+
     def _get_conn(self):
         """Get a new SQLite connection with proper pragmas.
 
@@ -867,6 +886,11 @@ class JobEngine:
 
         self._started = True
         self._stop_event.clear()
+        with self._worker_lock:
+            self.worker_started_at = self._now_iso()
+            self.worker_last_heartbeat = None
+            self.worker_iteration_count = 0
+            self.worker_last_error = None
         self._worker_thread = threading.Thread(
             target=self._worker_loop, args=(handler_func,), daemon=True
         )
@@ -970,66 +994,87 @@ class JobEngine:
     def _worker_loop(self, handler_func):
         """Main worker loop."""
         while not self._stop_event.is_set():
-            # Find a runnable job (skip WAITING_SOURCE unless retry is due)
-            conn = self._get_conn()
             try:
-                job_rows = conn.execute("""
-                    SELECT job_id, job_type FROM jobs
-                    WHERE status IN ('PENDING', 'RUNNING', 'WAITING_SOURCE')
-                    ORDER BY created_at ASC
-                """).fetchall()
-            finally:
-                conn.close()
+                # R5-C3: Update heartbeat on each iteration
+                with self._worker_lock:
+                    self.worker_last_heartbeat = self._now_iso()
+                    self.worker_iteration_count += 1
 
-            found_runnable = False
-            for job_row in job_rows:
-                job_id, job_type = job_row
+                # Find a runnable job (skip WAITING_SOURCE unless retry is due)
+                conn = self._get_conn()
+                try:
+                    job_rows = conn.execute("""
+                        SELECT job_id, job_type FROM jobs
+                        WHERE status IN ('PENDING', 'RUNNING', 'WAITING_SOURCE')
+                        ORDER BY created_at ASC
+                    """).fetchall()
+                finally:
+                    conn.close()
 
-                if not self._is_job_runnable(job_id):
-                    continue
+                found_runnable = False
+                for job_row in job_rows:
+                    job_id, job_type = job_row
 
-                # Try conditional transition to RUNNING
-                if not self._try_transition_to_running(job_id):
-                    continue  # State changed (pause/cancel), skip
-
-                found_runnable = True
-
-                # Process chunks one by one
-                while not self._stop_event.is_set():
-                    chunk = self._claim_chunk(job_id)
-                    if not chunk:
-                        # No more chunks — check job status
-                        self._recompute_job_counters(job_id)
-
-                        # Check if job is done/failed/cancelled
-                        conn = self._get_conn()
-                        try:
-                            job = conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-                            if job and job[0] in (JOB_DONE, JOB_FAILED, JOB_CANCELLED):
-                                break
-                            if job and job[0] == JOB_WAITING_SOURCE:
-                                # Wait for retry time, then try next job
-                                break
-                            if job and job[0] == JOB_PAUSED:
-                                break
-                        finally:
-                            conn.close()
-
-                        # Wait before checking again
-                        self._stop_event.wait(1.0)
+                    if not self._is_job_runnable(job_id):
+                        logger.debug("Job %s: not runnable, skipping", job_id[:8])
                         continue
 
-                    # Execute chunk handler
-                    result = self._execute_chunk(chunk, handler_func)
+                    # Try conditional transition to RUNNING
+                    if not self._try_transition_to_running(job_id):
+                        logger.debug("Job %s: transition to RUNNING failed, skipping", job_id[:8])
+                        continue  # State changed (pause/cancel), skip
 
-                    if result == "transient":
-                        # Transient error — job is now WAITING_SOURCE
-                        # Stop processing this job, return to outer scheduler
-                        break
+                    found_runnable = True
+                    logger.info("Job %s: processing chunks", job_id[:8])
 
-                    # Minimum 1 second between chunks
+                    # Process chunks one by one
+                    while not self._stop_event.is_set():
+                        chunk = self._claim_chunk(job_id)
+                        if not chunk:
+                            # No more chunks — check job status
+                            self._recompute_job_counters(job_id)
+
+                            # Check if job is done/failed/cancelled
+                            conn = self._get_conn()
+                            try:
+                                job = conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+                                if job and job[0] in (JOB_DONE, JOB_FAILED, JOB_CANCELLED):
+                                    logger.info("Job %s: terminal state=%s, stopping", job_id[:8], job[0])
+                                    break
+                                if job and job[0] == JOB_WAITING_SOURCE:
+                                    # Wait for retry time, then try next job
+                                    logger.info("Job %s: WAITING_SOURCE", job_id[:8])
+                                    break
+                                if job and job[0] == JOB_PAUSED:
+                                    logger.info("Job %s: PAUSED", job_id[:8])
+                                    break
+                            finally:
+                                conn.close()
+
+                            # Wait before checking again
+                            self._stop_event.wait(1.0)
+                            continue
+
+                        # Execute chunk handler
+                        logger.info("Job %s: executing chunk %s", job_id[:8], chunk["chunk_key"])
+                        result = self._execute_chunk(chunk, handler_func)
+
+                        if result == "transient":
+                            # Transient error — job is now WAITING_SOURCE
+                            # Stop processing this job, return to outer scheduler
+                            break
+
+                        # Minimum 1 second between chunks
+                        self._stop_event.wait(1.0)
+
+                # Sleep after ALL jobs checked — not inside the for loop
+                if not found_runnable:
                     self._stop_event.wait(1.0)
 
-            # Sleep after ALL jobs checked — not inside the for loop
-            if not found_runnable:
-                self._stop_event.wait(1.0)
+            except Exception as e:
+                # R5-C3: Never let the worker thread die silently.
+                # Log the error and sleep before retrying.
+                logger.error("Worker loop iteration failed: %s", e, exc_info=True)
+                with self._worker_lock:
+                    self.worker_last_error = str(e)[:500]
+                self._stop_event.wait(5.0)

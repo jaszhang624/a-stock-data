@@ -110,3 +110,15 @@ async def health_tdx():
                 "error": str(e),
             }
         )
+
+
+@router.get("/health/worker")
+async def health_worker():
+    """R5-C3: Read-only worker thread health status."""
+    from astock_api.main import get_engine
+
+    engine = get_engine()
+    if not engine:
+        raise HTTPException(status_code=503, detail={"error": "JobEngine not initialized"})
+
+    return engine.get_worker_health()
