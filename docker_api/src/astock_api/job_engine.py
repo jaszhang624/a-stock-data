@@ -626,11 +626,15 @@ class JobEngine:
             data = handler_func(payload)
         except TransientJobError as e:
             retry_count = chunk.get("retry_count", 0) or 0
-            if retry_count < MAX_RETRIES:
+            if retry_count + 1 < MAX_RETRIES:
+                # Still have retries left — mark RETRY with backoff.
+                # retry_count tracks how many times this chunk has already failed.
+                # After incrementing, it will be retry_count+1 (still < MAX_RETRIES).
                 backoff = RETRY_BACKOFFS[retry_count] if retry_count < len(RETRY_BACKOFFS) else RETRY_BACKOFFS[-1]
                 next_retry = (datetime.now(timezone.utc) + timedelta(seconds=backoff)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                 self._mark_chunk_retry(chunk["chunk_id"], job_id, retry_count + 1, next_retry, str(e))
             else:
+                # Next increment would reach MAX_RETRIES — terminalize to FAILED.
                 self._mark_chunk_failed(chunk["chunk_id"], job_id, str(e))
             return "transient"  # Signal caller to stop processing this job
         except PermanentJobError as e:
