@@ -185,17 +185,17 @@ if ASTOCK_API_KEY:
         return schema
     app.openapi = custom_openapi
 
-# Mount health routes
-app.include_router(health_router)
+# Mount health routes (direct append — include_router doesn't work in this FastAPI version)
+app.router.routes.extend(health_router.routes)
 
 # Mount API routes
 from astock_api.api.routes import router as api_routes, universe_router
-app.include_router(api_routes)
-app.include_router(universe_router)
+app.router.routes.extend(api_routes.routes)
+app.router.routes.extend(universe_router.routes)
 
 # Mount job routes (job engine started in lifespan)
 from astock_api.job_routes import router as job_router
-app.include_router(job_router)
+app.router.routes.extend(job_router.routes)
 
 # Store app reference for job routes to access engine
 job_router.app = app
