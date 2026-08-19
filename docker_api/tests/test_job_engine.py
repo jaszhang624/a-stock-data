@@ -92,7 +92,7 @@ class TestJobEngine:
             now = self.engine._now_iso()
             conn.execute(
                 "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (chunk_id, result["job_id"], "market_bars|600519|daily|100", "{}", "PENDING", now, now)
+                (chunk_id, result["job_id"], "market_bars|SSE:600519|daily|100", "{}", "PENDING", now, now)
             )
             conn.commit()
             assert False, "Should have raised UNIQUE constraint error"
@@ -264,7 +264,7 @@ class TestJobEngine:
         engine._execute_chunk(chunk, mock_handler)
 
         # Check result file exists
-        chunk_key = "market_bars|600519|daily|100"
+        chunk_key = "market_bars|SSE:600519|daily|100"
         result_path = engine._result_path(result["job_id"], chunk_key)
         assert os.path.exists(result_path)
 
@@ -730,7 +730,7 @@ class TestJobEngine:
             "count": 100,
         })
 
-        chunk_key = "market_bars|600519|daily|100"
+        chunk_key = "market_bars|SSE:600519|daily|100"
         path = self.engine._result_path(result["job_id"], chunk_key)
 
         assert path.startswith(self.data_dir)
@@ -1318,7 +1318,7 @@ class TestR2Regression:
         engine._execute_chunk(chunk, handler_with_truncation)
 
         # Verify result file has exactly 3 rows
-        chunk_key = "market_bars|600519|daily|3"
+        chunk_key = "market_bars|SSE:600519|daily|3"
         result_path = engine._result_path(result["job_id"], chunk_key)
         with open(result_path) as f:
             saved = json.load(f)
@@ -1526,7 +1526,7 @@ class TestR2Regression:
         })
 
         # Write result file directly (simulating crash after write)
-        chunk_key = "market_bars|600519|daily|10"
+        chunk_key = "market_bars|SSE:600519|daily|10"
         result_path = engine._result_path(result["job_id"], chunk_key)
         os.makedirs(os.path.dirname(result_path), exist_ok=True)
         with open(result_path, 'w') as f:
@@ -1578,7 +1578,7 @@ class TestR2Regression:
         })
 
         # Write corrupted result file
-        chunk_key = "market_bars|600519|daily|10"
+        chunk_key = "market_bars|SSE:600519|daily|10"
         result_path = engine._result_path(result["job_id"], chunk_key)
         os.makedirs(os.path.dirname(result_path), exist_ok=True)
         with open(result_path, 'w') as f:

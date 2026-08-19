@@ -283,8 +283,19 @@ class JobEngine:
                 )
 
                 for symbol in unique_symbols:
-                    chunk_key = f"market_bars|{symbol}|{frequency}|{count}"
-                    payload = {"job_type": "market_bars_snapshot", "symbol": symbol, "frequency": frequency, "count": count}
+                    # C4B-3: Parse bare symbol to Instrument for canonical chunk identity.
+                    from astock_api.instrument import parse_instrument
+                    instrument = parse_instrument(symbol, asset_type="EQUITY")
+                    chunk_key = f"market_bars|{instrument.canonical_id}|{frequency}|{count}"
+                    payload = {
+                        "job_type": "market_bars_snapshot",
+                        "symbol": symbol,
+                        "canonical_id": instrument.canonical_id,
+                        "exchange": instrument.exchange,
+                        "asset_type": instrument.asset_type,
+                        "frequency": frequency,
+                        "count": count,
+                    }
                     chunk_id = str(uuid.uuid4())
                     conn.execute(
                         "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -371,8 +382,20 @@ class JobEngine:
                 )
 
                 for symbol in unique_symbols:
-                    chunk_key = f"market_bars_sync|{symbol}|{frequency}|{count}"
-                    payload = {"job_type": "market_bars_sync", "job_id": job_id, "symbol": symbol, "frequency": frequency, "count": count}
+                    # C4B-3: Parse bare symbol to Instrument for canonical chunk identity.
+                    from astock_api.instrument import parse_instrument
+                    instrument = parse_instrument(symbol, asset_type="EQUITY")
+                    chunk_key = f"market_bars_sync|{instrument.canonical_id}|{frequency}|{count}"
+                    payload = {
+                        "job_type": "market_bars_sync",
+                        "job_id": job_id,
+                        "symbol": symbol,
+                        "canonical_id": instrument.canonical_id,
+                        "exchange": instrument.exchange,
+                        "asset_type": instrument.asset_type,
+                        "frequency": frequency,
+                        "count": count,
+                    }
                     chunk_id = str(uuid.uuid4())
                     conn.execute(
                         "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
