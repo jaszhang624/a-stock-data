@@ -17,7 +17,10 @@ def market_bars_handler(payload: dict):
 
     payload: {"symbol": "600519", "frequency": "daily", "count": 100}
     R5-C2: payload may include "chunk_id" for checkpoint persistence.
+    C4B-2: bare symbol is parsed to Instrument (EQUITY context) before governor.
     """
+    from astock_api.instrument import parse_instrument
+
     symbol = str(payload["symbol"])
     frequency = payload.get("frequency", "daily")
     count = int(payload.get("count", 100))
@@ -34,9 +37,13 @@ def market_bars_handler(payload: dict):
             f"market_bars_snapshot supports 6-digit numeric symbols only: {symbol}"
         )
 
+    # C4B-2: Parse bare symbol to Instrument in EQUITY context.
+    # Existing equity workflow: 600519 → SSE:600519, 000001 → SZSE:000001
+    instrument = parse_instrument(symbol, asset_type="EQUITY")
+
     try:
         governor = get_governor()
-        result = governor.fetch_market_bars(symbol, frequency, count)
+        result = governor.fetch_market_bars(instrument, frequency, count)
     except GovernorUnavailableError as e:
         # R5-C2: save checkpoints for each source error before re-raising
         if chunk_id and e.source_errors:
@@ -75,8 +82,10 @@ def market_bars_sync_handler(payload: dict):
 
     payload: {"symbol": "600519", "frequency": "daily", "count": 100}
     R5-C2: payload may include "chunk_id" for checkpoint persistence.
+    C4B-2: bare symbol is parsed to Instrument (EQUITY context) before governor.
     """
     from astock_api.dataset_store import DatasetStore
+    from astock_api.instrument import parse_instrument
 
     symbol = str(payload["symbol"])
     frequency = payload.get("frequency", "daily")
@@ -93,10 +102,13 @@ def market_bars_sync_handler(payload: dict):
             f"market_bars_sync supports 6-digit numeric symbols only: {symbol}"
         )
 
+    # C4B-2: Parse bare symbol to Instrument in EQUITY context.
+    instrument = parse_instrument(symbol, asset_type="EQUITY")
+
     # Step 1: Acquire via Source Governor (reuse existing capability)
     try:
         governor = get_governor()
-        result = governor.fetch_market_bars(symbol, frequency, count)
+        result = governor.fetch_market_bars(instrument, frequency, count)
     except GovernorUnavailableError as e:
         # R5-C2: save checkpoints for each source error before re-raising
         if chunk_id and e.source_errors:
@@ -110,8 +122,8 @@ def market_bars_sync_handler(payload: dict):
     except Exception as e:
         raise TransientJobError(f"source governor failed for {symbol}: {e}") from e
 
-    # Step 2: Normalize to canonical format
-    security_id = DatasetStore.make_security_id(symbol)
+    # Step 2: Use Instrument canonical_id as security_id (aligns with DatasetStore)
+    security_id = instrument.canonical_id
 
     # Source Governor returns normalized rows with keys:
     # datetime, open, high, low, close, volume (手), amount (元)

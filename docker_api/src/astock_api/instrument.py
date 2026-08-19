@@ -43,6 +43,12 @@ INDEX_PREFIX_TO_EXCHANGE = {}
 # Code pattern: exactly 6 digits
 CODE_PATTERN = re.compile(r"^\d{6}$")
 
+# TDX market mapping (for mootdx adapter routing)
+TDX_MARKET_MAP = {
+    "SSE": 1,   # Shanghai
+    "SZSE": 0,  # Shenzhen
+}
+
 
 # ── Exceptions ──────────────────────────────────────────────────────
 
@@ -148,6 +154,42 @@ def _check_explicit_conflict(code: str, exchange: str, asset_type: str) -> None:
                 f"code '{code}' with asset_type=EQUITY belongs to {expected}, "
                 f"not {exchange}"
             )
+
+
+# ── Adapter routing helpers ────────────────────────────────────────
+
+def instrument_to_mootdx_market(instrument: Instrument) -> int | None:
+    """Convert Instrument exchange to mootdx TDX market code.
+
+    Returns:
+        1 for SSE, 0 for SZSE, None if unsupported (e.g., BSE or INDEX).
+
+    Raises:
+        InstrumentValidationError: if exchange is not recognized.
+    """
+    market = TDX_MARKET_MAP.get(instrument.exchange)
+    if market is None:
+        return None  # BSE or other unsupported exchanges
+    return market
+
+
+def instrument_to_baidu_symbol(instrument: Instrument) -> str | None:
+    """Convert Instrument to Baidu provider-specific symbol format.
+
+    Returns:
+        Provider-specific symbol string (e.g., 'sh600519', 'sz000001')
+        or None if unsupported.
+
+    Baidu uses lowercase prefix: sh/SZ for SSE/SZSE.
+    """
+    prefix_map = {
+        "SSE": "sh",
+        "SZSE": "sz",
+    }
+    prefix = prefix_map.get(instrument.exchange)
+    if prefix is None:
+        return None  # BSE or other unsupported exchanges
+    return f"{prefix}{instrument.code}"
 
 
 # ── parse_instrument ───────────────────────────────────────────────

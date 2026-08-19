@@ -6,6 +6,7 @@ for the job handler layer.
 
 import threading as _threading
 import time as _time_module
+from typing import Any
 
 from astock_api.source_adapters import (
     MarketBarsSource,
@@ -144,21 +145,25 @@ class SourceGovernor:
         self._health[name]["open_until"] = None
 
     def fetch_market_bars(
-        self, symbol: str, frequency: str, count: int
+        self, instrument: Any, frequency: str, count: int
     ) -> dict:
         """Fetch market bars from the first available source.
 
         Args:
-            symbol: 6-digit A-share code (e.g. '600519').
+            instrument: Instrument object with exchange, code, asset_type.
+                Passed through to adapters for provider-specific conversion.
             frequency: 'daily' (only supported value).
             count: Number of bars to return.
 
         Returns:
-            Result dict with source, symbol, frequency, requested_count, rows.
+            Result dict with source, symbol, canonical_id, exchange, frequency, requested_count, rows.
 
         Raises:
             GovernorUnavailableError: all sources returned transient/data errors or are OPEN/HALF_OPEN.
             GovernorUnsupportedError: no source supports this symbol/market.
+
+        C4B-2: Instrument identity is preserved through the governor chain.
+        The governor does NOT re-infer exchange from code prefix.
         """
         errors: list[SourceError] = []
 
@@ -196,7 +201,7 @@ class SourceGovernor:
 
             # ── Call adapter (outside lock) ───────────────────────
             try:
-                result = source.fetch_market_bars(symbol, frequency, count)
+                result = source.fetch_market_bars(instrument, frequency, count)
 
                 # ── Write probe result (thread-safe) ─────────────
                 with lock:
@@ -249,7 +254,7 @@ class SourceGovernor:
             # All sources returned unsupported or data errors — symbol simply has no data.
             # This is a permanent condition; retrying will not help.
             raise GovernorUnsupportedError(
-                f"no data available for symbol {symbol}: {[str(e) for e in errors]}",
+                f"no data available for symbol {instrument.code}: {[str(e) for e in errors]}",
                 source_errors=errors,
             )
 
@@ -258,7 +263,7 @@ class SourceGovernor:
         # The mootdx answer is authoritative, but baidu OPEN means we haven't checked baidu yet.
         # Don't permanently fail; wait for baidu cooldown to expire and retry.
         raise GovernorUnavailableError(
-            f"all sources unavailable for {symbol}: {[str(e) for e in errors]}",
+            f"all sources unavailable for {instrument.code}: {[str(e) for e in errors]}",
             source_errors=errors,
         )
 
