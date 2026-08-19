@@ -124,11 +124,14 @@ class DatasetStore:
 
     @staticmethod
     def code_to_exchange(code: str) -> str:
-        """Map 6-digit code to exchange.
+        """Map 6-digit code to exchange using equity prefix rules.
 
         SSE: codes starting with '6' or '9' (Shanghai)
         SZSE: codes starting with '0' or '3' (Shenzhen)
         BSE: codes starting with '4', '8', or '92' (Beijing)
+
+        WARNING: This method uses EQUITY-only prefix inference.
+        For INDEX instruments, use make_security_id(code, exchange=...) with explicit exchange.
         """
         if code.startswith(('6', '9')):
             return 'SSE'
@@ -140,13 +143,35 @@ class DatasetStore:
             raise ValueError(f"Unknown exchange for code: {code}")
 
     @staticmethod
-    def make_security_id(code: str) -> str:
+    def make_security_id(code: str, exchange: str | None = None) -> str:
         """Create canonical security_id from code.
 
         Format: "<exchange>:<code>" e.g., "SSE:600519"
+
+        Args:
+            code: 6-digit numeric string (e.g., "600519")
+            exchange: Optional explicit exchange. If provided, bypasses prefix inference.
+                      Required for INDEX instruments where prefix does not determine exchange.
+
+        Examples:
+            >>> make_security_id("600519")  # equity prefix inference
+            'SSE:600519'
+
+            >>> make_security_id("000001", exchange="SZSE")  # explicit equity
+            'SZSE:000001'
+
+            >>> make_security_id("000001", exchange="SSE")  # INDEX on SSE
+            'SSE:000001'
+
+        Raises:
+            ValueError: code is invalid, exchange inference fails, or explicit exchange is not recognized.
         """
-        exchange = DatasetStore.code_to_exchange(code)
-        return f"{exchange}:{code}"
+        if exchange is not None:
+            if exchange.upper() not in {"SSE", "SZSE", "BSE"}:
+                raise ValueError(f"Invalid exchange '{exchange}', must be one of SSE, SZSE, BSE")
+            return f"{exchange.upper()}:{code}"
+        inferred = DatasetStore.code_to_exchange(code)
+        return f"{inferred}:{code}"
 
     def write_market_bars(self, security_id: str, bars: list[dict], source: str, job_id: str):
         """Idempotent UPSERT of daily bars into market_bars_daily.
