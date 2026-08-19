@@ -247,6 +247,7 @@ class JobEngine:
 
         if job_type == "market_bars_snapshot":
             symbols = params.get("symbols", [])
+            instruments = params.get("instruments", [])
             frequency = params.get("frequency", "daily")
             count = params.get("count", 100)
 
@@ -254,23 +255,69 @@ class JobEngine:
             if frequency not in SUPPORTED_FREQUENCIES:
                 raise ValueError("market_bars_snapshot currently supports daily only")
 
-            if not symbols or len(symbols) > 500:
-                raise ValueError("symbols must be 1-500")
             if not (1 <= count <= 800):
                 raise ValueError("count must be 1-800")
 
-            # Deduplicate preserving order, reject ".."
-            seen = set()
-            unique_symbols = []
-            for s in symbols:
-                s = str(s)
-                if ".." in s:
-                    raise ValueError(f"Invalid symbol (contains ..): {s}")
-                if not SYMBOL_PATTERN.match(s):
-                    raise ValueError(f"Invalid symbol: {s}")
-                if s not in seen:
-                    seen.add(s)
-                    unique_symbols.append(s)
+            # C4C-3: Resolve instruments or symbols into chunk entries.
+            # If 'instruments' is provided, use it for explicit identity.
+            # Otherwise, fall back to 'symbols' (bare codes → EQUITY).
+            chunk_entries = []  # list of (symbol_str, Instrument)
+
+            if instruments:
+                # C4C-3: Structured instrument input with explicit identity
+                if len(instruments) > 500:
+                    raise ValueError("instruments must be 1-500")
+
+                for inst_dict in instruments:
+                    code = str(inst_dict.get("code", ""))
+                    exchange = inst_dict.get("exchange")
+                    asset_type = str(inst_dict.get("asset_type", "EQUITY")).upper()
+
+                    # Validate code format (6-digit numeric)
+                    from astock_api.instrument import CODE_PATTERN as _CODE_PATTERN
+                    if not _CODE_PATTERN.match(code):
+                        raise ValueError(f"Invalid instrument code: {code}")
+
+                    # C4C-3: INDEX requires explicit exchange
+                    if asset_type == "INDEX" and exchange is None:
+                        raise ValueError(
+                            f"exchange must be specified for INDEX code '{code}' "
+                            f"(prefix does not uniquely determine exchange)"
+                        )
+
+                    # Parse to Instrument for canonical identity
+                    from astock_api.instrument import parse_instrument, AmbiguousExchangeError
+
+                    try:
+                        instrument = parse_instrument(code, exchange=exchange, asset_type=asset_type)
+                    except AmbiguousExchangeError as e:
+                        raise ValueError(str(e))
+
+                    chunk_entries.append((code, instrument))
+
+            elif symbols:
+                # Legacy path: bare symbols → EQUITY (unchanged)
+                if len(symbols) > 500:
+                    raise ValueError("symbols must be 1-500")
+
+                # Deduplicate preserving order, reject ".."
+                seen = set()
+                for s in symbols:
+                    s = str(s)
+                    if ".." in s:
+                        raise ValueError(f"Invalid symbol (contains ..): {s}")
+                    if not SYMBOL_PATTERN.match(s):
+                        raise ValueError(f"Invalid symbol: {s}")
+                    if s not in seen:
+                        seen.add(s)
+
+                        # C4B-3: Parse bare symbol to Instrument for canonical chunk identity.
+                        from astock_api.instrument import parse_instrument
+                        instrument = parse_instrument(s, asset_type="EQUITY")
+                        chunk_entries.append((s, instrument))
+
+            else:
+                raise ValueError("either 'symbols' or 'instruments' must be provided")
 
             job_id = str(uuid.uuid4())
             now = self._now_iso()
@@ -279,17 +326,14 @@ class JobEngine:
             try:
                 conn.execute(
                     "INSERT INTO jobs (job_id, job_type, status, params_json, total_chunks, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (job_id, job_type, JOB_PENDING, json.dumps(params), len(unique_symbols), now, now)
+                    (job_id, job_type, JOB_PENDING, json.dumps(params), len(chunk_entries), now, now)
                 )
 
-                for symbol in unique_symbols:
-                    # C4B-3: Parse bare symbol to Instrument for canonical chunk identity.
-                    from astock_api.instrument import parse_instrument
-                    instrument = parse_instrument(symbol, asset_type="EQUITY")
+                for symbol_str, instrument in chunk_entries:
                     chunk_key = f"market_bars|{instrument.canonical_id}|{frequency}|{count}"
                     payload = {
                         "job_type": "market_bars_snapshot",
-                        "symbol": symbol,
+                        "symbol": symbol_str,
                         "canonical_id": instrument.canonical_id,
                         "exchange": instrument.exchange,
                         "asset_type": instrument.asset_type,

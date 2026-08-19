@@ -179,16 +179,16 @@ class TestExplicitIdentityNotReinferred:
         )
 
         mock_client = MagicMock()
-        mock_client.bars.return_value = mock_df
+        mock_client.index_bars.return_value = mock_df
 
         source = MootdxSource()
         with patch.object(source, "_get_client", return_value=mock_client):
             inst = Instrument(exchange="SSE", code="000001", asset_type="INDEX")
             source.fetch_market_bars(inst, "daily", 3)
 
-        # Verify client.bars was called with code="000001" (not re-inferred to SZSE)
-        mock_client.bars.assert_called_once()
-        call_args = mock_client.bars.call_args
+        # Verify client.index_bars was called (INDEX routes to index_bars, not bars)
+        mock_client.index_bars.assert_called_once()
+        call_args = mock_client.index_bars.call_args
         assert call_args[0][0] == "000001"
 
 

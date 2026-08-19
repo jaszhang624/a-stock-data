@@ -125,11 +125,17 @@ class MootdxSource(MarketBarsSource):
         except Exception as e:
             raise SourceTransientError(f"mootdx client unavailable: {e}") from e
 
+        # Route by asset_type: INDEX uses index_bars, EQUITY uses bars
+        if instrument.asset_type == "INDEX":
+            method = client.index_bars
+        else:
+            method = client.bars
+
         try:
-            df = client.bars(instrument.code, 9, offset=count)
+            df = method(instrument.code, 9, offset=count)
         except Exception as e:
             raise SourceTransientError(
-                f"mootdx bars request failed for {instrument.code}: {e}"
+                f"mootdx {instrument.asset_type.lower()} request failed for {instrument.code}: {e}"
             ) from e
 
         if df is None or not hasattr(df, "empty") or df.empty:

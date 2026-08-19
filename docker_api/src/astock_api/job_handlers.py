@@ -37,9 +37,18 @@ def market_bars_handler(payload: dict):
             f"market_bars_snapshot supports 6-digit numeric symbols only: {symbol}"
         )
 
-    # C4B-2: Parse bare symbol to Instrument in EQUITY context.
-    # Existing equity workflow: 600519 → SSE:600519, 000001 → SZSE:000001
-    instrument = parse_instrument(symbol, asset_type="EQUITY")
+    # C4C-3: Use explicit identity from payload if available (INDEX path).
+    # Fallback to legacy EQUITY inference for backward compatibility.
+    asset_type = payload.get("asset_type")
+    exchange = payload.get("exchange")
+
+    if asset_type and exchange:
+        # C4C-3: Explicit identity from structured instrument input.
+        from astock_api.instrument import Instrument
+        instrument = Instrument(exchange=exchange, code=symbol, asset_type=asset_type)
+    else:
+        # Legacy path: bare symbol → EQUITY context (unchanged).
+        instrument = parse_instrument(symbol, asset_type="EQUITY")
 
     try:
         governor = get_governor()
@@ -102,8 +111,18 @@ def market_bars_sync_handler(payload: dict):
             f"market_bars_sync supports 6-digit numeric symbols only: {symbol}"
         )
 
-    # C4B-2: Parse bare symbol to Instrument in EQUITY context.
-    instrument = parse_instrument(symbol, asset_type="EQUITY")
+    # C4C-3: Use explicit identity from payload if available (INDEX path).
+    # Fallback to legacy EQUITY inference for backward compatibility.
+    asset_type = payload.get("asset_type")
+    exchange = payload.get("exchange")
+
+    if asset_type and exchange:
+        # C4C-3: Explicit identity from structured instrument input.
+        from astock_api.instrument import Instrument
+        instrument = Instrument(exchange=exchange, code=symbol, asset_type=asset_type)
+    else:
+        # Legacy path: bare symbol → EQUITY context (unchanged).
+        instrument = parse_instrument(symbol, asset_type="EQUITY")
 
     # Step 1: Acquire via Source Governor (reuse existing capability)
     try:
