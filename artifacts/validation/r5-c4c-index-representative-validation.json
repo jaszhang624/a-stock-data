@@ -1,0 +1,30 @@
+{
+  "phase": "R5-C4C-4",
+  "name": "Representative Index Production Validation",
+  "validation_type": "representative",
+  "instruments": [
+    {"code": "000001", "exchange": "SSE", "asset_type": "INDEX"},
+    {"code": "000300", "exchange": "SSE", "asset_type": "INDEX"},
+    {"code": "000688", "exchange": "SSE", "asset_type": "INDEX"},
+    {"code": "589000", "exchange": "SSE", "asset_type": "INDEX"},
+    {"code": "399001", "exchange": "SZSE", "asset_type": "INDEX"},
+    {"code": "399006", "exchange": "SZSE", "asset_type": "INDEX"},
+    {"code": "399300", "exchange": "SZSE", "asset_type": "INDEX"}
+  ],
+  "per_instrument_status": [
+    {"instrument": "SSE:000001", "status": "DONE", "rows": 200, "source": "mootdx"},
+    {"instrument": "SSE:000300", "status": "DONE", "rows": 200, "source": "mootdx"},
+    {"instrument": "SSE:000688", "status": "DONE", "rows": 200, "source": "mootdx"},
+    {"instrument": "SSE:589000", "status": "UPSTREAM_NO_DATA", "rows": 0, "source": "mootdx+baidu empty"},
+    {"instrument": "SZSE:399001", "status": "DONE", "rows": 200, "source": "mootdx"},
+    {"instrument": "SZSE:399006", "status": "DONE", "rows": 200, "source": "mootdx"},
+    {"instrument": "SZSE:399300", "status": "DONE", "rows": 200, "source": "mootdx"}
+  ],
+  "done": 6,
+  "upstream_no_data": 1,
+  "architecture_failures": 0,
+  "duplicate_rows": 0,
+  "cross_market_contamination": 0,
+  "pipeline_result": "PASS",
+  "notes": "SSE:589000 classified as UPSTREAM_NO_DATA — both mootdx and baidu returned empty results. This is an upstream coverage gap, not a pipeline defect."
+}

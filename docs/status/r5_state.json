@@ -1,0 +1,55 @@
+{
+  "release": "R5",
+  "status": "COMPLETE",
+  "regression_baseline": {
+    "passed": 445,
+    "skipped": 2,
+    "new_skips": 0
+  },
+  "capabilities": [
+    "durable_background_jobengine",
+    "retry_checkpoint_restart_recovery",
+    "equity_daily_market_bars",
+    "canonical_instrument_identity",
+    "exchange_aware_chunk_identity",
+    "backward_compatibility",
+    "datasetstore_explicit_exchange",
+    "structured_index_input",
+    "mootdx_index_bars_routing",
+    "real_index_end_to_end_retrieval"
+  ],
+  "equity_burnin": {
+    "total": 5215,
+    "done": 5209,
+    "failed": 6,
+    "coverage_percent": 99.885,
+    "failed_symbols": ["688835", "688836", "601123", "301655", "301688", "301697"]
+  },
+  "index_validation": {
+    "validation_type": "representative",
+    "total_instruments": 7,
+    "done": 6,
+    "upstream_no_data": 1,
+    "architecture_failures": 0
+  },
+  "deprecated_artifacts": {
+    "old_index_universe_167": "DEPRECATED_NON_REPRODUCIBLE"
+  },
+  "key_commits": {
+    "C4B-1_identity_primitives": "50df1b2",
+    "C4B-2_adapter_routing": "4d3fe55",
+    "C4B-3_persistence_chunk_identity": "90cf9b1",
+    "C4B-4_backward_compatibility": "80da9ff",
+    "C4C-2_datasetstore_explicit_exchange": "6f7f496",
+    "C4C-3_index_vertical_slice": "b3acd0c"
+  },
+  "next_roadmap": [
+    "reproducible_instrument_universe_v2",
+    "incremental_daily_updates",
+    "coverage_freshness_gap_detection",
+    "query_consumption_api",
+    "nas_production_release",
+    "optional_provider_fallback",
+    "new_asset_types"
+  ]
+}

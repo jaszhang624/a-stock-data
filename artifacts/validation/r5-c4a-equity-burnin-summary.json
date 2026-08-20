@@ -1,0 +1,19 @@
+{
+  "phase": "R5-C4A",
+  "name": "Equity Production Burn-in",
+  "total": 5215,
+  "done": 5209,
+  "failed": 6,
+  "coverage_percent": 99.885,
+  "failed_symbols": [
+    "688835",
+    "688836",
+    "601123",
+    "301655",
+    "301688",
+    "301697"
+  ],
+  "failure_classification": "upstream_source_availability",
+  "architecture_failure": false,
+  "notes": "All failures classified as upstream data unavailability. No systemic architecture defects detected."
+}
