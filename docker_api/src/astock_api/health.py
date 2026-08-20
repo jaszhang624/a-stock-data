@@ -122,3 +122,27 @@ async def health_worker():
         raise HTTPException(status_code=503, detail={"error": "JobEngine not initialized"})
 
     return engine.get_worker_health()
+
+
+@router.get("/health/data")
+async def health_data(reference_date: str = "2026-08-20"):
+    """Read-only coverage/freshness summary for market bars data.
+
+    Args:
+        reference_date: Explicit YYYY-MM-DD date for freshness assessment.
+    """
+    from astock_api.dataset_store import DatasetStore
+    from astock_api.coverage import get_coverage_summary
+
+    store = DatasetStore("/app/data/astock_data.duckdb")
+    store.bootstrap()
+
+    universe_path = "/app/data/universe/instrument_universe_v2.json"
+    if not os.path.exists(universe_path):
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Universe v2 artifact not found"}
+        )
+
+    summary = get_coverage_summary(store, universe_path, reference_date)
+    return {**summary, "status": "ok"}

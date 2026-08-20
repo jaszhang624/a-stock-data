@@ -430,6 +430,51 @@ class DatasetStore:
             return str(row[0])[:10]  # YYYY-MM-DD
         return None
 
+    def get_instrument_state(self, security_id: str) -> dict | None:
+        """Get aggregate state for a single instrument.
+
+        Returns security_id, row_count, earliest_trade_date, latest_trade_date.
+        Returns None if no data exists for this security_id.
+
+        Uses a single aggregate query — does not load bars into Python.
+        """
+        conn = self.get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*), MIN(trade_date), MAX(trade_date) FROM market_bars_daily WHERE security_id=?",
+            (security_id,)
+        ).fetchone()
+        if not row or row[0] == 0:
+            return None
+        return {
+            "security_id": security_id,
+            "row_count": row[0],
+            "earliest_trade_date": str(row[1])[:10] if row[1] else None,
+            "latest_trade_date": str(row[2])[:10] if row[2] else None,
+        }
+
+    def get_all_instrument_states(self) -> list[dict]:
+        """Get aggregate state for ALL instruments in one query.
+
+        Returns list of dicts with security_id, row_count, earliest_trade_date, latest_trade_date.
+        Uses GROUP BY — avoids N+1 database access pattern.
+
+        Result is sorted by security_id for deterministic output.
+        """
+        conn = self.get_conn()
+        rows = conn.execute(
+            "SELECT security_id, COUNT(*) as cnt, MIN(trade_date), MAX(trade_date) "
+            "FROM market_bars_daily GROUP BY security_id ORDER BY security_id"
+        ).fetchall()
+        return [
+            {
+                "security_id": row[0],
+                "row_count": row[1],
+                "earliest_trade_date": str(row[2])[:10] if row[2] else None,
+                "latest_trade_date": str(row[3])[:10] if row[3] else None,
+            }
+            for row in rows
+        ]
+
     def log_ingestion(self, job_type: str, job_id: str, table_name: str,
                       rows_inserted: int = 0, rows_updated: int = 0, rows_unchanged: int = 0,
                       status: str = 'success'):
