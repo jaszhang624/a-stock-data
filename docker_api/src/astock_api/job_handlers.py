@@ -178,6 +178,132 @@ def market_bars_sync_handler(payload: dict):
     return {"security_id": security_id, "bars_count": len(bars)}
 
 
+def market_bars_update_handler(payload: dict):
+    """Incremental daily bars update handler.
+
+    Idempotent: given the same instrument and target date,
+    first run adds missing rows; second run is NOOP with zero duplicates.
+
+    payload: {
+        "symbol": "600519",
+        "canonical_id": "SSE:600519",
+        "exchange": "SSE",
+        "asset_type": "EQUITY",
+        "frequency": "daily",
+        "count": 10,              # fetch count (bootstrap or incremental)
+        "target_date": "2026-08-20",  # optional target date
+        "bootstrap_count": 100,   # fallback count when no stored data exists
+    }
+
+    Returns metadata dict with:
+        canonical_id, latest_before, latest_after, rows_fetched,
+        rows_inserted, status (UPDATED / NOOP)
+    """
+    from astock_api.dataset_store import DatasetStore
+    from astock_api.instrument import Instrument, parse_instrument
+
+    symbol = str(payload["symbol"])
+    frequency = payload.get("frequency", "daily")
+    count = int(payload.get("count", 10))
+    target_date = payload.get("target_date")
+    bootstrap_count = int(payload.get("bootstrap_count", 100))
+
+    if frequency != "daily":
+        raise PermanentJobError(f"market_bars_update supports daily only: {frequency}")
+
+    # Build Instrument from explicit identity
+    asset_type = payload.get("asset_type", "EQUITY")
+    exchange = payload.get("exchange")
+
+    if asset_type and exchange:
+        instrument = Instrument(exchange=exchange, code=symbol, asset_type=asset_type)
+    else:
+        instrument = parse_instrument(symbol, asset_type="EQUITY")
+
+    security_id = instrument.canonical_id
+
+    # Open DuckDB store
+    store = DatasetStore('/app/data/astock_data.duckdb')
+    store.bootstrap()
+
+    # Step 1: Query latest stored trade date for this security_id
+    latest_before = store.get_latest_trade_date(security_id)
+
+    # Step 2: Determine fetch count
+    if latest_before is None:
+        # Bootstrap: no stored data, fetch bounded window
+        fetch_count = bootstrap_count
+    else:
+        # Incremental: already have data, fetch recent bars to cover gap
+        fetch_count = count
+
+    # Step 3: Fetch via Source Governor
+    try:
+        governor = get_governor()
+        result = governor.fetch_market_bars(instrument, frequency, fetch_count)
+    except GovernorUnavailableError as e:
+        raise TransientJobError(f"all sources unavailable for {symbol}: {e}") from e
+    except GovernorUnsupportedError as e:
+        raise PermanentJobError(f"no source supports {symbol}: {e}") from e
+    except Exception as e:
+        raise TransientJobError(f"source governor failed for {symbol}: {e}") from e
+
+    # Step 4: Normalize bars
+    bars = []
+    if isinstance(result, dict):
+        rows = result.get('rows', [])
+        for bar in rows:
+            bars.append({
+                "trade_date": str(bar.get('datetime', ''))[:10],
+                "open": bar.get('open'),
+                "high": bar.get('high'),
+                "low": bar.get('low'),
+                "close": bar.get('close'),
+                "volume": int(bar.get('volume', 0)),
+                "amount": float(bar.get('amount', 0)),
+            })
+
+    # Step 5: Filter — only bars after latest stored date (or all if bootstrap)
+    if latest_before and target_date:
+        filtered = [
+            b for b in bars
+            if latest_before < str(b['trade_date']) <= target_date
+        ]
+    elif latest_before:
+        filtered = [b for b in bars if str(b['trade_date']) > latest_before]
+    else:
+        # Bootstrap: use all bars, optionally cap at target_date
+        if target_date:
+            filtered = [b for b in bars if str(b['trade_date']) <= target_date]
+        else:
+            filtered = bars
+
+    rows_fetched = len(bars)
+    rows_to_write = len(filtered)
+
+    # Step 6: Idempotent UPSERT
+    if filtered:
+        store.write_market_bars(security_id, filtered, result.get('source', 'unknown'), payload.get('job_id', ''))
+
+    # Step 7: Determine latest_after
+    latest_after = store.get_latest_trade_date(security_id)
+
+    # Step 8: Determine status
+    if rows_to_write == 0:
+        status = "NOOP"
+    else:
+        status = "UPDATED"
+
+    return {
+        "canonical_id": security_id,
+        "latest_before": latest_before,
+        "latest_after": latest_after,
+        "rows_fetched": rows_fetched,
+        "rows_inserted": rows_to_write,
+        "status": status,
+    }
+
+
 def get_handler(job_type: str):
     """Get handler function for job type."""
     from astock_api.security_master_handler import security_master_snapshot_handler
@@ -186,6 +312,7 @@ def get_handler(job_type: str):
         "market_bars_snapshot": market_bars_handler,
         "market_bars_sync": market_bars_sync_handler,
         "security_master_snapshot": security_master_snapshot_handler,
+        "market_bars_update": market_bars_update_handler,
     }
     return handlers.get(job_type)
 

@@ -409,6 +409,27 @@ class DatasetStore:
         ).fetchone()
         return row[0] if row else None
 
+    def get_latest_trade_date(self, security_id: str) -> str | None:
+        """Get the latest stored trade_date for a given security_id.
+
+        Args:
+            security_id: Canonical ID (e.g., "SSE:600519")
+
+        Returns:
+            Latest trade_date as string "YYYY-MM-DD", or None if no data exists.
+
+        Preserves explicit Instrument/exchange identity:
+        SSE:000001 INDEX queries only SSE:000001, never SZSE:000001 EQUITY.
+        """
+        conn = self.get_conn()
+        row = conn.execute(
+            "SELECT MAX(trade_date) FROM market_bars_daily WHERE security_id=?",
+            (security_id,)
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])[:10]  # YYYY-MM-DD
+        return None
+
     def log_ingestion(self, job_type: str, job_id: str, table_name: str,
                       rows_inserted: int = 0, rows_updated: int = 0, rows_unchanged: int = 0,
                       status: str = 'success'):

@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────
-JOB_TYPES = {"market_bars_snapshot", "security_master_snapshot", "market_bars_sync"}
+JOB_TYPES = {"market_bars_snapshot", "security_master_snapshot", "market_bars_sync", "market_bars_update"}
 
 VALID_FREQUENCIES = {"daily", "1min", "5min", "15min", "30min", "1hour"}
 SUPPORTED_FREQUENCIES = {"daily"}  # Only daily for now
@@ -439,6 +439,78 @@ class JobEngine:
                         "asset_type": instrument.asset_type,
                         "frequency": frequency,
                         "count": count,
+                    }
+                    chunk_id = str(uuid.uuid4())
+                    conn.execute(
+                        "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (chunk_id, job_id, chunk_key, json.dumps(payload), CHUNK_PENDING, now, now)
+                    )
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        elif job_type == "market_bars_update":
+            instruments = params.get("instruments", [])
+            frequency = params.get("frequency", "daily")
+            count = int(params.get("count", 10))
+            target_date = params.get("target_date")
+            bootstrap_count = int(params.get("bootstrap_count", 100))
+
+            if frequency not in SUPPORTED_FREQUENCIES:
+                raise ValueError("market_bars_update currently supports daily only")
+
+            if not instruments or len(instruments) > 500:
+                raise ValueError("instruments must be 1-500")
+
+            chunk_entries = []
+            for inst_dict in instruments:
+                code = str(inst_dict.get("code", ""))
+                exchange = inst_dict.get("exchange")
+                asset_type = str(inst_dict.get("asset_type", "EQUITY")).upper()
+
+                from astock_api.instrument import CODE_PATTERN as _CODE_PATTERN
+                if not _CODE_PATTERN.match(code):
+                    raise ValueError(f"Invalid instrument code: {code}")
+
+                if asset_type == "INDEX" and exchange is None:
+                    raise ValueError(
+                        f"exchange must be specified for INDEX code '{code}'"
+                    )
+
+                from astock_api.instrument import parse_instrument, AmbiguousExchangeError
+                try:
+                    instrument = parse_instrument(code, exchange=exchange, asset_type=asset_type)
+                except AmbiguousExchangeError as e:
+                    raise ValueError(str(e))
+
+                chunk_entries.append((code, instrument))
+
+            job_id = str(uuid.uuid4())
+            now = self._now_iso()
+
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (job_id, job_type, status, params_json, total_chunks, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (job_id, job_type, JOB_PENDING, json.dumps(params), len(chunk_entries), now, now)
+                )
+
+                for code_str, instrument in chunk_entries:
+                    chunk_key = f"market_bars_update|{instrument.canonical_id}|{frequency}"
+                    payload = {
+                        "job_type": "market_bars_update",
+                        "symbol": code_str,
+                        "canonical_id": instrument.canonical_id,
+                        "exchange": instrument.exchange,
+                        "asset_type": instrument.asset_type,
+                        "frequency": frequency,
+                        "count": count,
+                        "target_date": target_date,
+                        "bootstrap_count": bootstrap_count,
                     }
                     chunk_id = str(uuid.uuid4())
                     conn.execute(
