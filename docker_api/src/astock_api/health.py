@@ -1,4 +1,6 @@
 """Health check endpoints."""
+import glob
+import json
 import os
 from fastapi import APIRouter, HTTPException
 
@@ -122,6 +124,104 @@ async def health_worker():
         raise HTTPException(status_code=503, detail={"error": "JobEngine not initialized"})
 
     return engine.get_worker_health()
+
+
+@router.get("/health/scheduler")
+async def health_scheduler():
+    """Read-only scheduler state observability."""
+    from astock_api.main import get_engine
+
+    engine = get_engine()
+    if not engine:
+        raise HTTPException(status_code=503, detail={"error": "JobEngine not initialized"})
+
+    from astock_api.scheduler_state import get_latest_run, initialize_scheduler_state
+
+    # Initialize table if it doesn't exist yet (no-op if already exists)
+    initialize_scheduler_state(engine)
+
+    latest = get_latest_run(engine)
+    if not latest:
+        return {
+            "status": "ok",
+            "last_run_status": None,
+            "last_run_at": None,
+            "last_plan_hash": None,
+            "jobs_created": 0,
+        }
+
+    return {
+        "status": "ok",
+        "last_run_status": latest["status"],
+        "last_run_at": latest["started_at"],
+        "last_plan_hash": latest.get("plan_hash"),
+        "jobs_created": latest.get("created_jobs", 0),
+    }
+
+
+@router.get("/health/run")
+async def health_run():
+    """Read-only latest run lifecycle state."""
+    from astock_api.main import get_engine
+
+    engine = get_engine()
+    if not engine:
+        raise HTTPException(status_code=503, detail={"error": "JobEngine not initialized"})
+
+    from astock_api.run_lifecycle import get_latest_run, initialize_run_lifecycle
+
+    initialize_run_lifecycle(engine)
+
+    latest = get_latest_run(engine)
+    if not latest:
+        return {
+            "status": "ok",
+            "latest_run_id": None,
+            "status_field": None,
+            "reference_date": None,
+            "finished_at": None,
+            "quality_status": None,
+        }
+
+    return {
+        "status": "ok",
+        "latest_run_id": latest["run_id"],
+        "status_field": latest["status"],
+        "reference_date": latest.get("reference_date"),
+        "finished_at": latest.get("finished_at"),
+        "quality_status": latest.get("quality_status"),
+    }
+
+
+@router.get("/health/burnin")
+async def health_burnin():
+    """Read-only burn-in session state.
+
+    Reads the most recent burn-in session state file on disk (stateless —
+    no in-memory session registry, safe to call at any time).
+    """
+    import glob
+
+    state_files = sorted(glob.glob(os.path.join("data", "reports", "burnin", "*", "session.json")))
+    if not state_files:
+        return {"active": False, "session_id": None}
+
+    with open(state_files[-1]) as f:
+        state = json.load(f)
+
+    cycles = state.get("cycles", [])
+    last = cycles[-1] if cycles else None
+
+    return {
+        "active": state.get("status") == "RUNNING",
+        "session_id": state.get("session_id"),
+        "cycle_completed": len(cycles),
+        "total_cycles": state.get("total_cycles"),
+        "last_status": last.get("status") if last else None,
+        "last_snapshot": (
+            f"cycle_{last['cycle']:03d}.json" if last else None
+        ),
+    }
 
 
 @router.get("/health/data")
