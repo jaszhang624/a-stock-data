@@ -186,7 +186,17 @@ class JobEngine:
             except sqlite3.OperationalError:
                 pass  # Column already exists (idempotent)
 
-            conn.execute("PRAGMA user_version=2")
+            # R6-7A: Plan materialization deduplication registry
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plan_materializations (
+                    plan_hash TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    job_ids TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'materialized'
+                )
+            """)
+
+            conn.execute("PRAGMA user_version=3")
             conn.commit()
         finally:
             conn.close()

@@ -58,7 +58,7 @@ class TestJobEngine:
 
             # Check PRAGMA user_version
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            assert version == 2
+            assert version == 3
         finally:
             conn.close()
 
@@ -2226,7 +2226,7 @@ class TestR2Regression:
         conn = engine._get_conn()
         try:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            assert version == 2
+            assert version == 3
 
             tables = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
