@@ -1,0 +1,259 @@
+"""Run Lifecycle: production-level orchestration record for update cycles.
+
+Tracks the full lifecycle of each update run with granular states:
+CREATED → RUNNING → PLANNED → EXECUTING → VERIFYING → SUCCESS/FAILED/INTERRUPTED
+
+Uses the existing JobEngine SQLite database — no new DB.
+"""
+
+import logging
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+
+def _ensure_table(engine) -> None:
+    """Create update_runs table if it doesn't exist."""
+    conn = engine._get_conn()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS update_runs (
+                run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reference_date TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL DEFAULT 'CREATED',
+                plan_hash TEXT,
+                jobs_created INTEGER DEFAULT 0,
+                jobs_done INTEGER DEFAULT 0,
+                jobs_failed INTEGER DEFAULT 0,
+                quality_status TEXT,
+                error_message TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def initialize_run_lifecycle(engine) -> None:
+    """Ensure table exists and recover stale RUNNING/PLANNED/EXECUTING/VERIFYING records.
+
+    Args:
+        engine: JobEngine instance with _get_conn().
+    """
+    _ensure_table(engine)
+
+    conn = engine._get_conn()
+    try:
+        # Recover stale in-progress records → INTERRUPTED
+        cur = conn.execute(
+            "SELECT run_id FROM update_runs WHERE status IN ('RUNNING', 'PLANNED', 'EXECUTING', 'VERIFYING')"
+        )
+        stale_ids = [row[0] for row in cur.fetchall()]
+        if stale_ids:
+            placeholders = ",".join("?" * len(stale_ids))
+            conn.execute(
+                f"UPDATE update_runs SET status='INTERRUPTED', finished_at=? WHERE run_id IN ({placeholders})",
+                [datetime.now(timezone.utc).isoformat()] + stale_ids,
+            )
+            logger.info(f"Recovered {len(stale_ids)} stale run(s) → INTERRUPTED")
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def create_run(engine, reference_date: str) -> int:
+    """Create a new run record with CREATED status.
+
+    Args:
+        engine: JobEngine instance.
+        reference_date: YYYY-MM-DD date for this cycle.
+
+    Returns:
+        The new run_id.
+    """
+    _ensure_table(engine)
+
+    conn = engine._get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO update_runs (reference_date, started_at, status) VALUES (?, ?, 'CREATED')",
+            (reference_date, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def transition(engine, run_id: int, status: str, **kwargs) -> None:
+    """Transition a run to a new state.
+
+    Args:
+        engine: JobEngine instance.
+        run_id: The run id from create_run().
+        status: New status (RUNNING, PLANNED, EXECUTING, VERIFYING, SUCCESS, FAILED).
+        **kwargs: Additional fields to update (plan_hash, jobs_created, etc.).
+    """
+    conn = engine._get_conn()
+    try:
+        # Build SET clause dynamically
+        sets = ["status=?", "finished_at=?"]
+        values = [status, datetime.now(timezone.utc).isoformat() if status in ("SUCCESS", "FAILED", "INTERRUPTED") else None]
+
+        for key, val in kwargs.items():
+            if key != "run_id":
+                sets.append(f"{key}=?")
+                values.append(val)
+
+        values.append(run_id)
+        set_clause = ", ".join(sets)
+
+        conn.execute(
+            f"UPDATE update_runs SET {set_clause} WHERE run_id=?",
+            values,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def start_run(engine, run_id: int) -> None:
+    """Transition to RUNNING."""
+    transition(engine, run_id, "RUNNING")
+
+
+def set_planned(engine, run_id: int, plan_hash: str) -> None:
+    """Transition to PLANNED after plan generation."""
+    transition(engine, run_id, "PLANNED", plan_hash=plan_hash)
+
+
+def set_executing(engine, run_id: int, jobs_created: int = 0) -> None:
+    """Transition to EXECUTING after job materialization."""
+    transition(engine, run_id, "EXECUTING", jobs_created=jobs_created)
+
+
+def set_verifying(engine, run_id: int) -> None:
+    """Transition to VERIFYING for quality audit."""
+    transition(engine, run_id, "VERIFYING")
+
+
+def complete_run(engine, run_id: int, plan_hash: str | None = None,
+                 jobs_created: int = 0, jobs_done: int = 0,
+                 jobs_failed: int = 0, quality_status: str | None = None) -> None:
+    """Mark run as SUCCESS."""
+    transition(engine, run_id, "SUCCESS",
+               plan_hash=plan_hash or None,
+               jobs_created=jobs_created,
+               jobs_done=jobs_done,
+               jobs_failed=jobs_failed,
+               quality_status=quality_status or None)
+
+
+def fail_run(engine, run_id: int, error_message: str) -> None:
+    """Mark run as FAILED."""
+    transition(engine, run_id, "FAILED", error_message=error_message)
+
+
+def get_latest_run(engine) -> dict | None:
+    """Get the most recent run.
+
+    Args:
+        engine: JobEngine instance.
+
+    Returns:
+        Dict with run details, or None if no runs exist.
+    """
+    _ensure_table(engine)
+
+    conn = engine._get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT run_id, reference_date, started_at, finished_at, status, "
+            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message "
+            "FROM update_runs ORDER BY run_id DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+    finally:
+        conn.close()
+
+
+def get_last_successful_run(engine) -> dict | None:
+    """Get the most recent SUCCESS run.
+
+    Args:
+        engine: JobEngine instance.
+
+    Returns:
+        Dict with run details, or None if no successful runs exist.
+    """
+    conn = engine._get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT run_id, reference_date, started_at, finished_at, status, "
+            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message "
+            "FROM update_runs WHERE status='SUCCESS' ORDER BY run_id DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+    finally:
+        conn.close()
+
+
+def get_run(engine, run_id: int) -> dict | None:
+    """Get a specific run by id.
+
+    Args:
+        engine: JobEngine instance.
+        run_id: The run id.
+
+    Returns:
+        Dict with run details, or None if not found.
+    """
+    conn = engine._get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT run_id, reference_date, started_at, finished_at, status, "
+            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message "
+            "FROM update_runs WHERE run_id=?",
+            (run_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+    finally:
+        conn.close()
+
+
+def get_runs(engine, limit: int = 10) -> list[dict]:
+    """Get recent runs.
+
+    Args:
+        engine: JobEngine instance.
+        limit: Max number of runs to return.
+
+    Returns:
+        List of run dicts, most recent first.
+    """
+    conn = engine._get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT run_id, reference_date, started_at, finished_at, status, "
+            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message "
+            "FROM update_runs ORDER BY run_id DESC LIMIT ?",
+            (limit,),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        conn.close()
