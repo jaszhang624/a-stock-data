@@ -21,6 +21,18 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 
+# ----------------------------------------------------------------------------
+# Quality gate thresholds (R6-3 quality gate spec, R3 proposal)
+# ----------------------------------------------------------------------------
+# Single source of truth for the gates evaluated in validate_snapshot().
+# Values are frozen from the R3 quality gate spec; do not tune them here.
+GATE_TOTAL_COVERAGE = 4500    # minimum total rows in a snapshot
+GATE_SSE_COVERAGE = 1800      # minimum SSE rows
+GATE_SZSE_COVERAGE = 2500     # minimum SZSE rows
+GATE_BSE_COVERAGE = 200       # minimum BSE rows (blocks ACTIVE, not VALIDATED)
+GATE_DELTA_MAX = 0.3          # max |new - prev| / prev ratio vs previous ACTIVE
+
+
 class DatasetStore:
     """DuckDB canonical data plane."""
 
@@ -283,8 +295,8 @@ class DatasetStore:
         ).fetchone()[0]
         duplicate_count = actual_row_count - unique_count
 
-        # Gate 2: Total coverage (>=4500)
-        total_coverage_pass = actual_row_count >= 4500
+        # Gate 2: Total coverage (>=GATE_TOTAL_COVERAGE)
+        total_coverage_pass = actual_row_count >= GATE_TOTAL_COVERAGE
 
         # Gate 3: SSE coverage (>=1800)
         sse_count = conn.execute(
@@ -408,6 +420,63 @@ class DatasetStore:
             (dataset_name,)
         ).fetchone()
         return row[0] if row else None
+
+    def rollback_snapshot(self, dataset_name: str) -> "str | None":
+        """Atomically roll back the active snapshot pointer to the previous one.
+
+        Transaction-safe: dataset_heads pointer and snapshot status are updated
+        in the same commit. After the call, exactly one snapshot for this
+        dataset has status='ACTIVE' and dataset_heads points to it.
+
+        Returns:
+            The snapshot_id now ACTIVE, or None if no previous snapshot exists.
+
+        Raises:
+            ValueError: no ACTIVE snapshot currently set for dataset_name.
+        """
+        conn = self.get_conn()
+        now = self._now_iso()
+
+        current = conn.execute(
+            "SELECT active_snapshot_id FROM dataset_heads "
+            "WHERE dataset_name=? AND status='ACTIVE'",
+            (dataset_name,),
+        ).fetchone()
+        if not current:
+            raise ValueError(
+                f"No ACTIVE snapshot set for '{dataset_name}' — nothing to roll back"
+            )
+        current_id = current[0]
+
+        # Find the most recent non-current snapshot eligible for activation:
+        # previously ACTIVE (now STALE) is the natural rollback target.
+        prev = conn.execute(
+            "SELECT snapshot_id FROM security_master_snapshots "
+            "WHERE snapshot_id != ? AND status IN ('ACTIVE', 'STALE') "
+            "ORDER BY created_at DESC LIMIT 1",
+            (current_id,),
+        ).fetchone()
+
+        if not prev:
+            return None
+        prev_id = prev[0]
+
+        # Atomic pointer switch + status update in one transaction
+        conn.execute(
+            "UPDATE dataset_heads SET active_snapshot_id=?, updated_at=? "
+            "WHERE dataset_name=? AND status='ACTIVE'",
+            (prev_id, now, dataset_name),
+        )
+        conn.execute(
+            "UPDATE security_master_snapshots SET status='STALE' WHERE snapshot_id=?",
+            (current_id,),
+        )
+        conn.execute(
+            "UPDATE security_master_snapshots SET status='ACTIVE' WHERE snapshot_id=?",
+            (prev_id,),
+        )
+        conn.commit()
+        return prev_id
 
     def get_latest_trade_date(self, security_id: str) -> str | None:
         """Get the latest stored trade_date for a given security_id.
