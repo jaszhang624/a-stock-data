@@ -273,3 +273,153 @@ def reject_snapshot(store: DatasetStore, snapshot_id: str, reason: str = "") -> 
     """
     store.update_snapshot_status(snapshot_id, "REJECTED")
     logger.info(f"Snapshot {snapshot_id} explicitly rejected: {reason}")
+
+
+# ── Refresh Pipeline (P9.3-C) ────────────────────────────────────────────────
+
+def refresh_security_master(
+    store: DatasetStore,
+    securities: list[dict],
+    source: str,
+    as_of: str | None = None,
+) -> ImportResult:
+    """Security Master refresh pipeline (Phase 9.3-C).
+
+    Reusable lifecycle primitive for an external source:
+      External Source → latest universe (already acquired)
+        → STAGING snapshot → validate → ACTIVE promotion
+        → reject invalid snapshot without affecting current ACTIVE.
+
+    Consumes an ALREADY-ACQUIRED list of securities, decoupled from the
+    live TDX/eastmoney fetch in security_master_handler.py. The activation
+    policy mirrors security_master_snapshot_handler exactly:
+      - valid + BSE coverage satisfied → ACTIVE
+      - valid, BSE missing            → VALIDATED (reported as VALIDATED_PARTIAL)
+      - invalid                       → REJECTED (current ACTIVE untouched)
+
+    Lifecycle:
+      1. Normalize rows (6-digit code + security_id; drop incomplete rows)
+      2. Compute deterministic checksum (sorted exchange:code pairs)
+      3. Idempotency: same checksum + source → return existing snapshot
+      4. Create STAGING snapshot
+      5. Write rows
+      6. Validate (quality gates)
+      7. BSE-gated promotion
+      8. Record ingestion (non-blocking)
+
+    Args:
+        store: DatasetStore instance (must be bootstrapped).
+        securities: List of dicts with at least 'code' and 'exchange'.
+        source: Provenance label (e.g. 'mootdx').
+        as_of: Snapshot date YYYY-MM-DD. Defaults to today (UTC).
+
+    Returns:
+        ImportResult with snapshot_id, status, row_count, checksum, validation.
+
+    Raises:
+        ValueError: no valid securities remain after normalization.
+    """
+    if as_of is None:
+        from datetime import datetime, timezone
+        as_of = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # 1. Normalize (truncate code, set security_id, drop incomplete rows)
+    normalized = []
+    for sec in securities:
+        code = str(sec.get("code", ""))[:6]
+        exchange = str(sec.get("exchange", ""))
+        if not code or not exchange:
+            logger.warning("refresh_security_master: skipping incomplete row %r", sec)
+            continue
+        sec["code"] = code
+        sec["security_id"] = f"{exchange}:{code}"
+        normalized.append(sec)
+
+    if not normalized:
+        raise ValueError(
+            "refresh_security_master: no valid securities after normalization"
+        )
+
+    # 2. Checksum
+    checksum = compute_universe_checksum(normalized)
+
+    # 3. Idempotency: look for existing snapshot with same checksum
+    conn = store.get_conn()
+    existing = conn.execute(
+        "SELECT snapshot_id, status FROM security_master_snapshots "
+        "WHERE checksum=? AND source=?",
+        (checksum, source),
+    ).fetchone()
+
+    if existing:
+        existing_id, existing_status = existing[0], existing[1]
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM security_master WHERE snapshot_id=?",
+            (existing_id,),
+        ).fetchone()[0]
+        logger.info(
+            f"Refresh idempotent: snapshot {existing_id} already exists "
+            f"(status={existing_status}, rows={row_count})"
+        )
+        return ImportResult(
+            snapshot_id=existing_id,
+            status=existing_status,
+            row_count=row_count,
+            checksum=checksum,
+        )
+
+    # 4. Create STAGING snapshot
+    snapshot_id = store.create_snapshot(
+        source=source,
+        as_of=as_of,
+        row_count=len(normalized),
+        checksum=checksum,
+        status="STAGING",
+    )
+
+    # 5. Write rows
+    written = store.write_security_master_snapshot(snapshot_id, normalized)
+
+    # 6. Validate
+    validation = store.validate_snapshot(snapshot_id)
+
+    # 7. BSE-gated promotion (mirrors security_master_snapshot_handler)
+    if validation.get("valid"):
+        store.update_snapshot_status(snapshot_id, "VALIDATED")
+        if validation.get("bse_coverage_satisfied"):
+            store.activate_snapshot("security_master", snapshot_id)
+            status = "ACTIVE"
+        else:
+            status = "VALIDATED_PARTIAL"
+            logger.warning(
+                f"Snapshot {snapshot_id} VALIDATED but not ACTIVE — BSE coverage missing"
+            )
+    else:
+        store.update_snapshot_status(snapshot_id, "REJECTED")
+        status = "REJECTED"
+        logger.error(
+            f"Security master refresh snapshot {snapshot_id} REJECTED: "
+            f"gates={validation.get('gates', {})}"
+        )
+
+    # 8. Log ingestion (non-blocking)
+    try:
+        store.log_ingestion(
+            job_type="security_master_refresh",
+            job_id=snapshot_id,
+            table_name="security_master",
+            rows_inserted=written,
+            rows_updated=0,
+            rows_unchanged=0,
+            status="success" if status != "REJECTED" else "failed",
+        )
+    except Exception as e:
+        logger.warning(f"Ingestion log failed (non-blocking): {e}")
+
+    return ImportResult(
+        snapshot_id=snapshot_id,
+        status=status,
+        row_count=written,
+        checksum=checksum,
+        validation=validation,
+    )
