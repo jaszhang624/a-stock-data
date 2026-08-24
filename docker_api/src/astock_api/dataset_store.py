@@ -421,6 +421,37 @@ class DatasetStore:
         ).fetchone()
         return row[0] if row else None
 
+    def get_active_security_master(self) -> list[dict] | None:
+        """Return instruments from the ACTIVE security_master snapshot.
+
+        Returns a list of dicts with keys matching the universe JSON format:
+        canonical_id, code, exchange, asset_type, name.
+        Only includes active listings. Returns None if no ACTIVE snapshot exists
+        (callers should fall back to the JSON universe file).
+        """
+        snapshot_id = self.get_active_snapshot("security_master")
+        if snapshot_id is None:
+            return None
+        conn = self.get_conn()
+        rows = conn.execute(
+            "SELECT security_id, code, exchange, security_type, name "
+            "FROM security_master WHERE snapshot_id=? AND listing_status='active'",
+            (snapshot_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        type_map = {"stock": "EQUITY", "index": "INDEX", "etf": "ETF", "bond": "BOND"}
+        return [
+            {
+                "canonical_id": r[0],
+                "code": r[1],
+                "exchange": r[2],
+                "asset_type": type_map.get(r[3], r[3].upper()),
+                "name": r[4],
+            }
+            for r in rows
+        ]
+
     def rollback_snapshot(self, dataset_name: str) -> "str | None":
         """Atomically roll back the active snapshot pointer to the previous one.
 

@@ -21,6 +21,29 @@ def load_universe(universe_path: str) -> list[dict]:
     return data.get("instruments", [])
 
 
+def _load_instruments(store, universe_path: str):
+    """Load instruments from Security Master (primary) or JSON (fallback).
+
+    Returns (instruments, source_label).
+    - source_label = 'security_master' when SM is ACTIVE
+    - source_label = 'universe_json' on fallback
+
+    Security Master rows arrive already universe-shaped from
+    DatasetStore.get_active_security_master() (canonical_id, code,
+    exchange, asset_type, name) — passed through unchanged.
+    """
+    try:
+        sm_instruments = store.get_active_security_master()
+    except Exception as e:
+        logger.warning(f"Security Master read failed, falling back to JSON: {e}")
+        sm_instruments = None
+
+    if sm_instruments:
+        return sm_instruments, "security_master"
+
+    return load_universe(universe_path), "universe_json"
+
+
 def generate_coverage_snapshot(
     store,
     universe_path: str,
@@ -31,7 +54,7 @@ def generate_coverage_snapshot(
 
     Args:
         store: DatasetStore instance (must have get_all_instrument_states).
-        universe_path: Path to instrument_universe_v2.json.
+        universe_path: Path to instrument_universe_v2.json (fallback source).
         reference_date: Explicit YYYY-MM-DD reference date for freshness.
         output_dir: Directory to write coverage artifact.
 
@@ -40,8 +63,9 @@ def generate_coverage_snapshot(
     """
     from astock_api.freshness import assess_freshness
 
-    # Load universe instruments
-    instruments = load_universe(universe_path)
+    # Load instruments: Security Master primary, JSON universe fallback
+    instruments, source_label = _load_instruments(store, universe_path)
+    logger.info(f"Coverage instruments source: {source_label} ({len(instruments)} instruments)")
 
     # Batch query: get ALL stored states in one SQL call (avoids N+1)
     all_states = store.get_all_instrument_states()
@@ -142,6 +166,7 @@ def generate_coverage_snapshot(
     snapshot = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "reference_date": reference_date,
+        "universe_source": source_label,
         "universe_manifest_hash": universe_sha256,
         "summary": {
             "total_universe": total,
