@@ -12,6 +12,8 @@ from astock_api.registry import register, list_functions, validate_registry
 from astock_api.serializer import normalize_result
 from astock_api.health import router as health_router
 from astock_api.security import verify_api_key
+from astock_api.update_cycle_service import UpdateCycleService
+from astock_api.update_cycle_scheduler import ScheduleConfig
 
 # ── Register upstream functions ──────────────────────────────────────
 from astock_api.upstream.common import tdx_client, get_prefix, norm_ticker
@@ -104,6 +106,52 @@ register("fund_flow_backup", "capital", "backup", "Fund flow backup source", fun
 register("announcements_backup", "announcements", "backup", "Announcements backup source", func=announcements_backup)
 
 # ── App lifecycle ────────────────────────────────────────────────────
+def _start_update_cycle(app, engine, store, universe_path):
+    """Construct and start the update-cycle service when the feature flag is on.
+
+    Reads ``UPDATE_CYCLE_ENABLED`` from config at call time (so tests can flip
+    the flag) and constructs ``UpdateCycleService`` (a module-level name, so a
+    test can substitute a fake). Returns the started service, or ``None`` when
+    the feature is disabled. The caller is responsible for calling
+    ``service.stop()`` (before ``engine.stop()``) on shutdown.
+    """
+    from astock_api.config import (
+        UPDATE_CYCLE_ENABLED,
+        UPDATE_CYCLE_INTERVAL_MIN,
+        UPDATE_CYCLE_TICK_SECONDS,
+    )
+
+    if not UPDATE_CYCLE_ENABLED:
+        return None
+
+    service = UpdateCycleService(
+        store=store,
+        engine=engine,
+        universe_path=universe_path,
+        config=ScheduleConfig(
+            enabled=True, interval_minutes=UPDATE_CYCLE_INTERVAL_MIN
+        ),
+        tick_seconds=UPDATE_CYCLE_TICK_SECONDS,
+    )
+    service.start()
+    app.state.update_cycle_service = service
+    return service
+
+
+def _stop_update_cycle(app, service, engine):
+    """Lifespan teardown, in the mandatory order.
+
+    ``service.stop()`` runs BEFORE ``engine.stop()`` so the cycle worker is
+    never torn down into a half-alive engine. ``service.stop()`` returns only
+    when the worker has definitely stopped, so ``engine.stop()`` always sees
+    the cycle idle.
+    """
+    if service is not None:
+        service.stop()
+        app.state.update_cycle_service = None
+    engine.stop()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import os, logging
@@ -149,10 +197,33 @@ async def lifespan(app: FastAPI):
     app.state.job_engine = engine
     logging.getLogger(__name__).info("Job engine started")
 
+    # P9.4 Step 2: update cycle scheduler (auto-trigger, off by default).
+    # Runs on its own daemon thread (off the asyncio event loop); stopped in
+    # the finally block below (before engine.stop()) so no cycle is triggered
+    # into a tearing-down engine.
+    from astock_api.config import UPDATE_CYCLE_ENABLED
+
+    update_cycle_service = None
+    if UPDATE_CYCLE_ENABLED:
+        from astock_api.dataset_store import DatasetStore
+
+        store = DatasetStore(os.path.join(DATA_DIR, "astock_data.duckdb"))
+        universe_path = os.path.join(
+            DATA_DIR, "universe", "instrument_universe_v2.json"
+        )
+        update_cycle_service = _start_update_cycle(
+            app, engine, store, universe_path
+        )
+        if update_cycle_service is not None:
+            logging.getLogger(__name__).info("Update cycle service started")
+
     try:
         yield
     finally:
-        engine.stop()
+        _stop_update_cycle(app, update_cycle_service, engine)
+        if update_cycle_service is not None:
+            logging.getLogger(__name__).info("Update cycle service stopped")
+        logging.getLogger(__name__).info("Job engine stopped")
 
 
 def get_engine():

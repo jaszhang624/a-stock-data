@@ -12,9 +12,13 @@ Architecture::
         v
     run_update_cycle()      (injected as ``run_callback``)
 
-State is held in memory only — no database, no config files, no daemon thread
-yet. The caller supplies the real cycle as ``run_callback`` and drives
-``run_once()`` from whatever loop it chooses.
+**Ordering guarantee (P9.4 Step 3):** when a cycle is due, the trigger instant is
+accepted, ``mark_triggered()`` advances the in-memory state, and the callback
+runs — in that order. Trigger acceptance therefore happens *before* the
+potentially long-running callback, so a crash mid-callback cannot lose the
+trigger from the in-memory schedule. Durable persistence of the accepted instant
+belongs to the driver layer (``UpdateCycleService``), which writes it to the
+JobEngine DB *before* the callback begins.
 """
 
 from __future__ import annotations
@@ -76,15 +80,25 @@ class UpdateCycleScheduler:
         self.next_due = now + timedelta(minutes=self.config.interval_minutes)
 
     def run_once(self, now: Optional[datetime] = None) -> Optional[Any]:
-        """If due: call ``run_callback()`` then ``mark_triggered()``.
+        """If due: accept one trigger, advance state, then call ``run_callback()``.
 
-        Returns the callback's execution result when it ran, or ``None`` when
-        the scheduler was not due (or disabled).
+        Sequence for a due cycle: the trigger instant ``now`` is accepted,
+        ``mark_triggered(now)`` advances ``last_triggered`` / ``next_due``, and
+        only then is ``run_callback()`` invoked. If the callback raises, the
+        advanced in-memory state is retained (a failed trigger is still a
+        consumed trigger); the exception propagates to the caller.
+
+        Returns the callback's execution result when a trigger ran, or
+        ``None`` when the scheduler was not due (or disabled). The return
+        value is the *callback output* — it is NOT a trigger indicator (a
+        callback may legitimately return ``None``); callers that need to know
+        whether a trigger occurred must check the scheduler state
+        (``last_triggered`` / ``next_due``), which advanced independently of
+        the callback's output.
         """
         if now is None:
             now = _utcnow()
         if not self.is_due(now):
             return None
-        result = self.run_callback()
         self.mark_triggered(now)
-        return result
+        return self.run_callback()

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def _ensure_table(engine) -> None:
-    """Create update_runs table if it doesn't exist."""
+    """Create update_runs table if it doesn't exist (idempotent)."""
     conn = engine._get_conn()
     try:
         conn.execute("""
@@ -257,3 +257,99 @@ def get_runs(engine, limit: int = 10) -> list[dict]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         conn.close()
+
+
+# ── Persistent trigger state (P9.4 Step 3) ─────────────────────────────
+#
+# The update-cycle trigger *timing* used to be process-local in-memory state
+# (``UpdateCycleScheduler.next_due``); a service restart reset it to "never
+# triggered" so the first tick after boot re-fired a cycle. Step 3 persists
+# the trigger instant durably so a reconstructed service/scheduler recovers
+# the last trigger across restarts.
+#
+# The state lives in its OWN dedicated table (``update_cycle_state``) inside
+# the SAME JobEngine SQLite database — not in ``update_runs``. The two are
+# different entity types: ``update_runs`` holds actual lifecycle runs and is
+# read by generic readers (``get_latest_run`` / ``get_runs`` / ``get_run``)
+# that must never surface scheduler control metadata; ``update_cycle_state``
+# is scheduler control metadata only (a singleton row keyed by ``key``,
+# ``last_triggered_at`` = ISO-8601 UTC instant).
+#
+# Initialization is idempotent (``CREATE TABLE IF NOT EXISTS`` + an upsert),
+# so a fresh database, an already-initialized database, and a legacy local
+# dev database all converge without destructive migration — P9.4 Step 3 never
+# shipped, so no migration framework is warranted. A legacy ``update_runs``
+# row written by an uncommitted Step 3 build (``run_id=0``,
+# ``status='STATE'``) is inert: no code reads it.
+_TRIGGER_STATE_KEY = "update_cycle"
+
+
+def _ensure_trigger_state_table(conn) -> None:
+    """Create the dedicated ``update_cycle_state`` table if it doesn't exist."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS update_cycle_state (
+            key TEXT PRIMARY KEY,
+            last_triggered_at TEXT
+        )
+        """
+    )
+
+
+def save_trigger_state(engine, last_triggered_at: str | None) -> None:
+    """Persist the last trigger instant for the update cycle.
+
+    Opens the engine's JobEngine SQLite DB (the same database the run
+    lifecycle uses), ensures the dedicated ``update_cycle_state`` table
+    exists, then upserts the singleton row.
+
+    Args:
+        engine: JobEngine instance.
+        last_triggered_at: ISO-8601 UTC instant, or ``None`` for "never
+            triggered" (the first-run state).
+    """
+    conn = engine._get_conn()
+    try:
+        _ensure_trigger_state_table(conn)
+        conn.execute(
+            """
+            INSERT INTO update_cycle_state (key, last_triggered_at)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                last_triggered_at = excluded.last_triggered_at
+            """,
+            (_TRIGGER_STATE_KEY, last_triggered_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_trigger_state(engine) -> str | None:
+    """Load the persisted last trigger instant from the engine's DB.
+
+    Returns:
+        The ISO-8601 UTC instant string, or ``None`` when no trigger state
+        exists (first run) — also returned for a corrupt value, so a
+        malformed state degrades to first-run semantics rather than crashing.
+    """
+    conn = engine._get_conn()
+    try:
+        _ensure_trigger_state_table(conn)
+        row = conn.execute(
+            "SELECT last_triggered_at FROM update_cycle_state WHERE key=?",
+            (_TRIGGER_STATE_KEY,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    value = row[0]
+    if not value:
+        return None
+    try:
+        # Reject a corrupt timestamp instead of carrying it forward.
+        datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+    return value
