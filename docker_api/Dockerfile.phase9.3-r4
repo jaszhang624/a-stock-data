@@ -1,0 +1,16 @@
+FROM a-stock-data-api:281fc69-phase9-3-r3
+
+# Build metadata (injected via build args — never hardcoded)
+ARG GIT_COMMIT
+ARG BUILD_TIME
+ENV BUILD_SERVICE=a-stock-data-api \
+    BUILD_IMAGE=a-stock-data-api:${GIT_COMMIT}-phase9-3-r4 \
+    BUILD_PHASE=9.3 \
+    BUILD_RELEASE=r4 \
+    BUILD_COMMIT=${GIT_COMMIT} \
+    BUILD_TIME=${BUILD_TIME}
+
+# Copy new source code (overwrites old)
+COPY src/ ./src/
+
+EXPOSE 8000

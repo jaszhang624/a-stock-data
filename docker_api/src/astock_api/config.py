@@ -20,9 +20,24 @@ IWENCAI_API_KEY = os.getenv("IWENCAI_API_KEY", "")
 # Cache
 CACHE_ENABLED = os.getenv("CACHE_ENABLED", "false").lower() == "true"
 
+# Update cycle automation (P9.4 Step 2)
+# Default OFF until wired + regression-tested. Interval = minutes between
+# triggers; tick = seconds between cheap in-memory due-checks in the service loop.
+UPDATE_CYCLE_ENABLED = os.getenv("UPDATE_CYCLE_ENABLED", "false").lower() == "true"
+UPDATE_CYCLE_INTERVAL_MIN = int(os.getenv("UPDATE_CYCLE_INTERVAL_MIN", "1440"))
+UPDATE_CYCLE_TICK_SECONDS = int(os.getenv("UPDATE_CYCLE_TICK_SECONDS", "60"))
+
 # Data/Cache directories
 DATA_DIR = os.getenv("ASTOCK_DATA_DIR", "/app/data")
 CACHE_DIR = os.getenv("ASTOCK_CACHE_DIR", "/app/cache")
 
 # Logging
 LOG_LEVEL = os.getenv("ASTOCK_LOG_LEVEL", "INFO")
+
+# Build metadata (injected at Docker build time via ENV)
+BUILD_SERVICE = os.getenv("BUILD_SERVICE", "a-stock-data-api")
+BUILD_IMAGE = os.getenv("BUILD_IMAGE", "")
+BUILD_PHASE = os.getenv("BUILD_PHASE", "")
+BUILD_RELEASE = os.getenv("BUILD_RELEASE", "")
+BUILD_COMMIT = os.getenv("BUILD_COMMIT", "")
+BUILD_TIME = os.getenv("BUILD_TIME", "")

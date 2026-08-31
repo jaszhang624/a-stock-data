@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────
-JOB_TYPES = {"market_bars_snapshot"}
+JOB_TYPES = {"market_bars_snapshot", "security_master_snapshot", "market_bars_sync", "market_bars_update"}
 
 VALID_FREQUENCIES = {"daily", "1min", "5min", "15min", "30min", "1hour"}
 SUPPORTED_FREQUENCIES = {"daily"}  # Only daily for now
@@ -90,6 +90,25 @@ class JobEngine:
         self._worker_thread = None
         self._started = False
 
+        # R5-C3: Worker observability (thread-safe via threading.Lock)
+        self._worker_lock = threading.Lock()
+        self.worker_started_at: str | None = None
+        self.worker_last_heartbeat: str | None = None
+        self.worker_iteration_count: int = 0
+        self.worker_last_error: str | None = None
+
+    def get_worker_health(self) -> dict:
+        """Return worker health status for /health/worker endpoint."""
+        with self._worker_lock:
+            return {
+                "status": "running" if self._started else "stopped",
+                "thread_alive": bool(self._worker_thread and self._worker_thread.is_alive()),
+                "started_at": self.worker_started_at,
+                "last_heartbeat": self.worker_last_heartbeat,
+                "iteration_count": self.worker_iteration_count,
+                "last_error": self.worker_last_error,
+            }
+
     def _get_conn(self):
         """Get a new SQLite connection with proper pragmas.
 
@@ -143,10 +162,49 @@ class JobEngine:
                     UNIQUE(job_id, chunk_key)
                 )
             """)
-            conn.execute("PRAGMA user_version=1")
+
+            # R5-C2: Source checkpoint table (provider x chunk)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS job_chunk_source_state (
+                    chunk_id    TEXT NOT NULL,
+                    capability  TEXT NOT NULL DEFAULT 'market_bars_daily',
+                    provider    TEXT NOT NULL,
+                    outcome     TEXT NOT NULL DEFAULT 'PENDING',
+                    completed   INTEGER NOT NULL DEFAULT 0,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error  TEXT,
+                    created_at  TEXT NOT NULL,
+                    updated_at  TEXT NOT NULL,
+                    PRIMARY KEY (chunk_id, capability, provider),
+                    FOREIGN KEY(chunk_id) REFERENCES job_chunks(chunk_id)
+                )
+            """)
+
+            # R5-C2: Add next_source column to job_chunks (nullable, safe ALTER)
+            try:
+                conn.execute("ALTER TABLE job_chunks ADD COLUMN next_source TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists (idempotent)
+
+            # R6-7A: Plan materialization deduplication registry
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plan_materializations (
+                    plan_hash TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    job_ids TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'materialized'
+                )
+            """)
+
+            conn.execute("PRAGMA user_version=3")
             conn.commit()
         finally:
             conn.close()
+
+        # R5-C3: Recover state on startup — orphan RUNNING → PENDING,
+        # stranded RETRY → FAILED, recompute job counters from durable chunk states.
+        # Idempotent: safe to call multiple times (initialize + start).
+        self._recover_state()
 
     def _now_iso(self):
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -199,12 +257,152 @@ class JobEngine:
 
         if job_type == "market_bars_snapshot":
             symbols = params.get("symbols", [])
+            instruments = params.get("instruments", [])
             frequency = params.get("frequency", "daily")
             count = params.get("count", 100)
 
             # Validate frequency — only daily supported
             if frequency not in SUPPORTED_FREQUENCIES:
                 raise ValueError("market_bars_snapshot currently supports daily only")
+
+            if not (1 <= count <= 800):
+                raise ValueError("count must be 1-800")
+
+            # C4C-3: Resolve instruments or symbols into chunk entries.
+            # If 'instruments' is provided, use it for explicit identity.
+            # Otherwise, fall back to 'symbols' (bare codes → EQUITY).
+            chunk_entries = []  # list of (symbol_str, Instrument)
+
+            if instruments:
+                # C4C-3: Structured instrument input with explicit identity
+                if len(instruments) > 500:
+                    raise ValueError("instruments must be 1-500")
+
+                for inst_dict in instruments:
+                    code = str(inst_dict.get("code", ""))
+                    exchange = inst_dict.get("exchange")
+                    asset_type = str(inst_dict.get("asset_type", "EQUITY")).upper()
+
+                    # Validate code format (6-digit numeric)
+                    from astock_api.instrument import CODE_PATTERN as _CODE_PATTERN
+                    if not _CODE_PATTERN.match(code):
+                        raise ValueError(f"Invalid instrument code: {code}")
+
+                    # C4C-3: INDEX requires explicit exchange
+                    if asset_type == "INDEX" and exchange is None:
+                        raise ValueError(
+                            f"exchange must be specified for INDEX code '{code}' "
+                            f"(prefix does not uniquely determine exchange)"
+                        )
+
+                    # Parse to Instrument for canonical identity
+                    from astock_api.instrument import parse_instrument, AmbiguousExchangeError
+
+                    try:
+                        instrument = parse_instrument(code, exchange=exchange, asset_type=asset_type)
+                    except AmbiguousExchangeError as e:
+                        raise ValueError(str(e))
+
+                    chunk_entries.append((code, instrument))
+
+            elif symbols:
+                # Legacy path: bare symbols → EQUITY (unchanged)
+                if len(symbols) > 500:
+                    raise ValueError("symbols must be 1-500")
+
+                # Deduplicate preserving order, reject ".."
+                seen = set()
+                for s in symbols:
+                    s = str(s)
+                    if ".." in s:
+                        raise ValueError(f"Invalid symbol (contains ..): {s}")
+                    if not SYMBOL_PATTERN.match(s):
+                        raise ValueError(f"Invalid symbol: {s}")
+                    if s not in seen:
+                        seen.add(s)
+
+                        # C4B-3: Parse bare symbol to Instrument for canonical chunk identity.
+                        from astock_api.instrument import parse_instrument
+                        instrument = parse_instrument(s, asset_type="EQUITY")
+                        chunk_entries.append((s, instrument))
+
+            else:
+                raise ValueError("either 'symbols' or 'instruments' must be provided")
+
+            job_id = str(uuid.uuid4())
+            now = self._now_iso()
+
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (job_id, job_type, status, params_json, total_chunks, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (job_id, job_type, JOB_PENDING, json.dumps(params), len(chunk_entries), now, now)
+                )
+
+                for symbol_str, instrument in chunk_entries:
+                    chunk_key = f"market_bars|{instrument.canonical_id}|{frequency}|{count}"
+                    payload = {
+                        "job_type": "market_bars_snapshot",
+                        "symbol": symbol_str,
+                        "canonical_id": instrument.canonical_id,
+                        "exchange": instrument.exchange,
+                        "asset_type": instrument.asset_type,
+                        "frequency": frequency,
+                        "count": count,
+                    }
+                    chunk_id = str(uuid.uuid4())
+                    conn.execute(
+                        "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (chunk_id, job_id, chunk_key, json.dumps(payload), CHUNK_PENDING, now, now)
+                    )
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        elif job_type == "security_master_snapshot":
+            source = params.get("source", "")
+            as_of = params.get("as_of", "")
+
+            if not source:
+                raise ValueError("security_master_snapshot requires 'source' param")
+
+            job_id = str(uuid.uuid4())
+            now = self._now_iso()
+
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (job_id, job_type, status, params_json, total_chunks, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (job_id, job_type, JOB_PENDING, json.dumps(params), 1, now, now)
+                )
+
+                chunk_key = f"security_master|{source}|{as_of}"
+                payload = {"job_type": "security_master_snapshot", "job_id": job_id, "source": source, "as_of": as_of}
+                chunk_id = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (chunk_id, job_id, chunk_key, json.dumps(payload), CHUNK_PENDING, now, now)
+                )
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        elif job_type == "market_bars_sync":
+            symbols = params.get("symbols", [])
+            frequency = params.get("frequency", "daily")
+            count = params.get("count", 100)
+
+            # Validate frequency — only daily supported
+            if frequency not in SUPPORTED_FREQUENCIES:
+                raise ValueError("market_bars_sync currently supports daily only")
 
             if not symbols or len(symbols) > 500:
                 raise ValueError("symbols must be 1-500")
@@ -218,6 +416,9 @@ class JobEngine:
                 s = str(s)
                 if ".." in s:
                     raise ValueError(f"Invalid symbol (contains ..): {s}")
+                # market_bars_sync requires 6-digit numeric symbols (handler contract)
+                if len(s) != 6 or not s.isdigit():
+                    raise ValueError(f"market_bars_sync requires 6-digit numeric symbol: {s}")
                 if not SYMBOL_PATTERN.match(s):
                     raise ValueError(f"Invalid symbol: {s}")
                 if s not in seen:
@@ -235,8 +436,92 @@ class JobEngine:
                 )
 
                 for symbol in unique_symbols:
-                    chunk_key = f"market_bars|{symbol}|{frequency}|{count}"
-                    payload = {"symbol": symbol, "frequency": frequency, "count": count}
+                    # C4B-3: Parse bare symbol to Instrument for canonical chunk identity.
+                    from astock_api.instrument import parse_instrument
+                    instrument = parse_instrument(symbol, asset_type="EQUITY")
+                    chunk_key = f"market_bars_sync|{instrument.canonical_id}|{frequency}|{count}"
+                    payload = {
+                        "job_type": "market_bars_sync",
+                        "job_id": job_id,
+                        "symbol": symbol,
+                        "canonical_id": instrument.canonical_id,
+                        "exchange": instrument.exchange,
+                        "asset_type": instrument.asset_type,
+                        "frequency": frequency,
+                        "count": count,
+                    }
+                    chunk_id = str(uuid.uuid4())
+                    conn.execute(
+                        "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (chunk_id, job_id, chunk_key, json.dumps(payload), CHUNK_PENDING, now, now)
+                    )
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        elif job_type == "market_bars_update":
+            instruments = params.get("instruments", [])
+            frequency = params.get("frequency", "daily")
+            count = int(params.get("count", 10))
+            target_date = params.get("target_date")
+            bootstrap_count = int(params.get("bootstrap_count", 100))
+
+            if frequency not in SUPPORTED_FREQUENCIES:
+                raise ValueError("market_bars_update currently supports daily only")
+
+            if not instruments or len(instruments) > 500:
+                raise ValueError("instruments must be 1-500")
+
+            chunk_entries = []
+            for inst_dict in instruments:
+                code = str(inst_dict.get("code", ""))
+                exchange = inst_dict.get("exchange")
+                asset_type = str(inst_dict.get("asset_type", "EQUITY")).upper()
+
+                from astock_api.instrument import CODE_PATTERN as _CODE_PATTERN
+                if not _CODE_PATTERN.match(code):
+                    raise ValueError(f"Invalid instrument code: {code}")
+
+                if asset_type == "INDEX" and exchange is None:
+                    raise ValueError(
+                        f"exchange must be specified for INDEX code '{code}'"
+                    )
+
+                from astock_api.instrument import parse_instrument, AmbiguousExchangeError
+                try:
+                    instrument = parse_instrument(code, exchange=exchange, asset_type=asset_type)
+                except AmbiguousExchangeError as e:
+                    raise ValueError(str(e))
+
+                chunk_entries.append((code, instrument))
+
+            job_id = str(uuid.uuid4())
+            now = self._now_iso()
+
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (job_id, job_type, status, params_json, total_chunks, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (job_id, job_type, JOB_PENDING, json.dumps(params), len(chunk_entries), now, now)
+                )
+
+                for code_str, instrument in chunk_entries:
+                    chunk_key = f"market_bars_update|{instrument.canonical_id}|{frequency}"
+                    payload = {
+                        "job_type": "market_bars_update",
+                        "symbol": code_str,
+                        "canonical_id": instrument.canonical_id,
+                        "exchange": instrument.exchange,
+                        "asset_type": instrument.asset_type,
+                        "frequency": frequency,
+                        "count": count,
+                        "target_date": target_date,
+                        "bootstrap_count": bootstrap_count,
+                    }
                     chunk_id = str(uuid.uuid4())
                     conn.execute(
                         "INSERT INTO job_chunks (chunk_id, job_id, chunk_key, payload_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -439,13 +724,23 @@ class JobEngine:
                     conn.rollback()
                     return None
 
-                # WAITING_SOURCE: only claim due RETRY chunks, never PENDING
+                # WAITING_SOURCE: claim due RETRY chunks AND PENDING chunks.
+                # PENDING chunks don't depend on baidu; only RETRY chunks that hit baidu OPEN need to wait.
+                # Try RETRY first (due), then PENDING.
                 if job_status == JOB_WAITING_SOURCE:
                     row = conn.execute("""
                         SELECT chunk_id FROM job_chunks
                         WHERE job_id=? AND status='RETRY' AND (next_retry_at IS NULL OR next_retry_at <= ?)
                         ORDER BY created_at ASC LIMIT 1
                     """, (job_id, now)).fetchone()
+
+                    if not row:
+                        # Fall back to PENDING chunks (they don't depend on baidu)
+                        row = conn.execute("""
+                            SELECT chunk_id FROM job_chunks
+                            WHERE job_id=? AND status='PENDING'
+                            ORDER BY created_at ASC LIMIT 1
+                        """, (job_id,)).fetchone()
 
                     if not row:
                         conn.rollback()
@@ -455,7 +750,7 @@ class JobEngine:
 
                     # Atomic: claim chunk + transition job in same transaction
                     updated = conn.execute(
-                        "UPDATE job_chunks SET status=?, started_at=?, updated_at=? WHERE chunk_id=? AND status='RETRY'",
+                        "UPDATE job_chunks SET status=?, started_at=?, updated_at=? WHERE chunk_id=? AND status IN ('RETRY','PENDING')",
                         (CHUNK_RUNNING, now, now, chunk_id)
                     ).rowcount
 
@@ -528,25 +823,27 @@ class JobEngine:
             data = handler_func(payload)
         except TransientJobError as e:
             retry_count = chunk.get("retry_count", 0) or 0
-            if retry_count < MAX_RETRIES:
+            if retry_count >= MAX_RETRIES - 1:
+                # Already failed MAX_RETRIES-1 times — this is the last attempt.
+                # Terminalize to FAILED with retry_count=MAX_RETRIES (atomic).
+                self._mark_chunk_exhausted(chunk["chunk_id"], job_id, str(e))
+            else:
+                # Still have retries left — mark RETRY with backoff.
                 backoff = RETRY_BACKOFFS[retry_count] if retry_count < len(RETRY_BACKOFFS) else RETRY_BACKOFFS[-1]
                 next_retry = (datetime.now(timezone.utc) + timedelta(seconds=backoff)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                 self._mark_chunk_retry(chunk["chunk_id"], job_id, retry_count + 1, next_retry, str(e))
-            else:
-                self._mark_chunk_failed(chunk["chunk_id"], job_id, str(e))
             return "transient"  # Signal caller to stop processing this job
         except PermanentJobError as e:
             self._mark_chunk_failed(chunk["chunk_id"], job_id, str(e))
             return None  # Permanent failure — continue with other chunks
         except Exception as e:
-            retry_count = chunk.get("retry_count", 0) or 0
-            if retry_count < MAX_RETRIES:
-                backoff = RETRY_BACKOFFS[retry_count] if retry_count < len(RETRY_BACKOFFS) else RETRY_BACKOFFS[-1]
-                next_retry = (datetime.now(timezone.utc) + timedelta(seconds=backoff)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-                self._mark_chunk_retry(chunk["chunk_id"], job_id, retry_count + 1, next_retry, str(e))
-            else:
-                self._mark_chunk_failed(chunk["chunk_id"], job_id, str(e))
-            return "transient"
+            # Unclassified exception → FAILED immediately.
+            # Do NOT retry or set WAITING_SOURCE: local deterministic errors
+            # (e.g., DuckDB catalog missing, file I/O) will never heal on retry.
+            # Expected upstream transients must arrive as TransientJobError.
+            logger.error("Chunk %s: unclassified exception — marking FAILED", chunk_key, exc_info=True)
+            self._mark_chunk_failed(chunk["chunk_id"], job_id, str(e))
+            return None  # Failure — continue with other chunks
 
         # Atomic write: file first, then DB
         result_path = self._atomic_write_result(job_id, chunk_key, data)
@@ -602,16 +899,115 @@ class JobEngine:
         finally:
             conn.close()
 
+    def _save_source_checkpoint(self, chunk_id: str, provider: str, outcome: str, completed: bool = True, error: str | None = None, capability: str = "market_bars_daily"):
+        """Save or update source checkpoint for a chunk+capability+provider.
+
+        Atomic upsert: creates row if missing, updates if exists.
+        Idempotent: safe to call multiple times with same outcome.
+
+        Args:
+            chunk_id: Chunk identifier.
+            provider: Source name (e.g. 'mootdx', 'baidu').
+            outcome: SourceOutcome value (DATA_OK, EMPTY, UNSUPPORTED, MALFORMED_DATA, TIMEOUT, RATE_LIMIT, SERVER_ERROR).
+            completed: Whether this provider step is considered complete (not to be retried).
+            error: Optional error message for non-success outcomes.
+            capability: Capability name (e.g. 'market_bars_daily'). Default: 'market_bars_daily'.
+        """
+        conn = self._get_conn()
+        try:
+            now = self._now_iso()
+            # Upsert via INSERT ... ON CONFLICT (chunk_id, capability, provider)
+            conn.execute("""
+                INSERT INTO job_chunk_source_state (chunk_id, capability, provider, outcome, completed, attempt_count, last_error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+                ON CONFLICT(chunk_id, capability, provider) DO UPDATE SET
+                    outcome = excluded.outcome,
+                    completed = excluded.completed,
+                    attempt_count = attempt_count + 1,
+                    last_error = excluded.last_error,
+                    updated_at = excluded.updated_at
+            """, (chunk_id, capability, provider, outcome, 1 if completed else 0, error or '', now, now))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _get_source_checkpoints(self, chunk_id: str) -> list[dict]:
+        """Return all source checkpoints for a chunk."""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT capability, provider, outcome, completed, attempt_count, last_error FROM job_chunk_source_state WHERE chunk_id=? ORDER BY capability, provider",
+                (chunk_id,)
+            ).fetchall()
+            return [{"capability": r[0], "provider": r[1], "outcome": r[2], "completed": bool(r[3]), "attempt_count": r[4], "last_error": r[5]} for r in rows]
+        finally:
+            conn.close()
+
+    def _set_next_source(self, chunk_id: str, next_source: str | None):
+        """Set the next source to try for a chunk."""
+        conn = self._get_conn()
+        try:
+            now = self._now_iso()
+            conn.execute(
+                "UPDATE job_chunks SET next_source=?, updated_at=? WHERE chunk_id=?",
+                (next_source, now, chunk_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _mark_chunk_exhausted(self, chunk_id: str, job_id: str, error: str):
+        """Terminalize a chunk that has exhausted all retries.
+
+        Atomic single-transaction update: sets status=FAILED, retry_count=MAX_RETRIES,
+        clears next_retry_at, and records finished_at. Then recomputes job counters.
+
+        retry_count semantics: counts transient failures already occurred.
+        When this is called, the chunk has failed MAX_RETRIES times total.
+        """
+        conn = self._get_conn()
+        try:
+            now = self._now_iso()
+            conn.execute(
+                "UPDATE job_chunks SET status=?, last_error=?, retry_count=?, next_retry_at=NULL, finished_at=?, updated_at=? WHERE chunk_id=?",
+                (CHUNK_FAILED, error, MAX_RETRIES, now, now, chunk_id)
+            )
+            self._recompute_job_counters_in_conn(conn, job_id)
+            conn.commit()
+        finally:
+            conn.close()
+
     def _recover_state(self):
-        """Recover state after crash: RUNNING chunks → RETRY, RUNNING jobs → PENDING."""
+        """Recover state after crash: RUNNING chunks → RETRY, RUNNING jobs → PENDING.
+
+        R5-C1: Also terminalize stranded RETRY chunks where retry_count >= MAX_RETRIES.
+        These are illegal states that should never exist but can occur from prior bugs.
+        """
         conn = self._get_conn()
         try:
             now = self._now_iso()
 
-            # RUNNING chunks → RETRY (but will skip if result file exists)
+            # R5-C1: Terminalize stranded RETRY chunks (retry_count >= MAX_RETRIES)
+            # These are illegal states — the chunk should have been FAILED, not RETRY.
+            # Idempotent: safe to run on every startup. No upstream calls needed.
+            stranded = conn.execute(
+                "SELECT chunk_id, job_id FROM job_chunks WHERE status=? AND retry_count >= ?",
+                (CHUNK_RETRY, MAX_RETRIES)
+            ).fetchall()
+            for (cid, jid,) in stranded:
+                conn.execute(
+                    "UPDATE job_chunks SET status=?, last_error=?, retry_count=?, next_retry_at=NULL, finished_at=?, updated_at=? WHERE chunk_id=?",
+                    (CHUNK_FAILED, "TRANSIENT_EXHAUSTED", MAX_RETRIES, now, now, cid)
+                )
+
+            # R5-C3: Orphan RUNNING chunks → PENDING (do NOT consume retry budget).
+            # Process crash ≠ upstream transient failure. The chunk's source checkpoints
+            # and next_source are preserved — on restart, the handler resumes from
+            # the saved position (e.g., baidu after mootdx EMPTY). If no checkpoint exists,
+            # the chunk re-executes from scratch (at-least-once semantics).
             conn.execute(
-                "UPDATE job_chunks SET status=?, next_retry_at=?, updated_at=? WHERE status=?",
-                (CHUNK_RETRY, now, now, CHUNK_RUNNING)
+                "UPDATE job_chunks SET status=?, updated_at=? WHERE status=?",
+                (CHUNK_PENDING, now, CHUNK_RUNNING)
             )
 
             # RUNNING jobs → PENDING (WAITING_SOURCE stays; PAUSED/CANCELLED/DONE/FAILED stay)
@@ -619,7 +1015,8 @@ class JobEngine:
                 "UPDATE jobs SET status=? WHERE status=?", (JOB_PENDING, JOB_RUNNING)
             )
 
-            # Recompute all job counters in same connection
+            # R5-C3: Recompute job status from durable chunk states.
+            # Prevents stale job status after crash (e.g., all chunks terminal but job still RUNNING).
             jobs = conn.execute("SELECT job_id FROM jobs").fetchall()
             for (jid,) in jobs:
                 self._recompute_job_counters_in_conn(conn, jid)
@@ -638,6 +1035,11 @@ class JobEngine:
 
         self._started = True
         self._stop_event.clear()
+        with self._worker_lock:
+            self.worker_started_at = self._now_iso()
+            self.worker_last_heartbeat = None
+            self.worker_iteration_count = 0
+            self.worker_last_error = None
         self._worker_thread = threading.Thread(
             target=self._worker_loop, args=(handler_func,), daemon=True
         )
@@ -671,12 +1073,13 @@ class JobEngine:
             now = self._now_iso()
 
             if status == JOB_WAITING_SOURCE:
-                # Only runnable if RETRY chunk is due now
-                retry_due = conn.execute("""
+                # Runnable if RETRY chunk is due now OR PENDING chunks exist.
+                # R5-B: PENDING chunks don't depend on baidu; they can proceed.
+                runnable = conn.execute("""
                     SELECT COUNT(*) FROM job_chunks
-                    WHERE job_id=? AND status='RETRY' AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                    WHERE job_id=? AND (status='PENDING' OR (status='RETRY' AND (next_retry_at IS NULL OR next_retry_at <= ?)))
                 """, (job_id, now)).fetchone()[0]
-                return retry_due > 0
+                return runnable > 0
 
             # PENDING or RUNNING: only runnable if there are executable chunks
             # (PENDING chunk OR due RETRY chunk)
@@ -717,6 +1120,11 @@ class JobEngine:
                 # r4: Do NOT transition WAITING_SOURCE here.
                 # _claim_chunk() will do it atomically in the same transaction as chunk claim.
                 return True  # Allow proceeding to _claim_chunk
+            elif current == JOB_RUNNING:
+                # Already running — allow proceeding to _claim_chunk.
+                # R5-C1: Without this, RUNNING jobs are skipped entirely,
+                # causing RETRY chunks to become stranded (never claimed).
+                return True
             else:
                 # PAUSED, CANCELLED, DONE, FAILED — don't override
                 return False
@@ -735,66 +1143,87 @@ class JobEngine:
     def _worker_loop(self, handler_func):
         """Main worker loop."""
         while not self._stop_event.is_set():
-            # Find a runnable job (skip WAITING_SOURCE unless retry is due)
-            conn = self._get_conn()
             try:
-                job_rows = conn.execute("""
-                    SELECT job_id, job_type FROM jobs
-                    WHERE status IN ('PENDING', 'RUNNING', 'WAITING_SOURCE')
-                    ORDER BY created_at ASC
-                """).fetchall()
-            finally:
-                conn.close()
+                # R5-C3: Update heartbeat on each iteration
+                with self._worker_lock:
+                    self.worker_last_heartbeat = self._now_iso()
+                    self.worker_iteration_count += 1
 
-            found_runnable = False
-            for job_row in job_rows:
-                job_id, job_type = job_row
+                # Find a runnable job (skip WAITING_SOURCE unless retry is due)
+                conn = self._get_conn()
+                try:
+                    job_rows = conn.execute("""
+                        SELECT job_id, job_type FROM jobs
+                        WHERE status IN ('PENDING', 'RUNNING', 'WAITING_SOURCE')
+                        ORDER BY created_at ASC
+                    """).fetchall()
+                finally:
+                    conn.close()
 
-                if not self._is_job_runnable(job_id):
-                    continue
+                found_runnable = False
+                for job_row in job_rows:
+                    job_id, job_type = job_row
 
-                # Try conditional transition to RUNNING
-                if not self._try_transition_to_running(job_id):
-                    continue  # State changed (pause/cancel), skip
-
-                found_runnable = True
-
-                # Process chunks one by one
-                while not self._stop_event.is_set():
-                    chunk = self._claim_chunk(job_id)
-                    if not chunk:
-                        # No more chunks — check job status
-                        self._recompute_job_counters(job_id)
-
-                        # Check if job is done/failed/cancelled
-                        conn = self._get_conn()
-                        try:
-                            job = conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-                            if job and job[0] in (JOB_DONE, JOB_FAILED, JOB_CANCELLED):
-                                break
-                            if job and job[0] == JOB_WAITING_SOURCE:
-                                # Wait for retry time, then try next job
-                                break
-                            if job and job[0] == JOB_PAUSED:
-                                break
-                        finally:
-                            conn.close()
-
-                        # Wait before checking again
-                        self._stop_event.wait(1.0)
+                    if not self._is_job_runnable(job_id):
+                        logger.debug("Job %s: not runnable, skipping", job_id[:8])
                         continue
 
-                    # Execute chunk handler
-                    result = self._execute_chunk(chunk, handler_func)
+                    # Try conditional transition to RUNNING
+                    if not self._try_transition_to_running(job_id):
+                        logger.debug("Job %s: transition to RUNNING failed, skipping", job_id[:8])
+                        continue  # State changed (pause/cancel), skip
 
-                    if result == "transient":
-                        # Transient error — job is now WAITING_SOURCE
-                        # Stop processing this job, return to outer scheduler
-                        break
+                    found_runnable = True
+                    logger.info("Job %s: processing chunks", job_id[:8])
 
-                    # Minimum 1 second between chunks
+                    # Process chunks one by one
+                    while not self._stop_event.is_set():
+                        chunk = self._claim_chunk(job_id)
+                        if not chunk:
+                            # No more chunks — check job status
+                            self._recompute_job_counters(job_id)
+
+                            # Check if job is done/failed/cancelled
+                            conn = self._get_conn()
+                            try:
+                                job = conn.execute("SELECT status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+                                if job and job[0] in (JOB_DONE, JOB_FAILED, JOB_CANCELLED):
+                                    logger.info("Job %s: terminal state=%s, stopping", job_id[:8], job[0])
+                                    break
+                                if job and job[0] == JOB_WAITING_SOURCE:
+                                    # Wait for retry time, then try next job
+                                    logger.info("Job %s: WAITING_SOURCE", job_id[:8])
+                                    break
+                                if job and job[0] == JOB_PAUSED:
+                                    logger.info("Job %s: PAUSED", job_id[:8])
+                                    break
+                            finally:
+                                conn.close()
+
+                            # Wait before checking again
+                            self._stop_event.wait(1.0)
+                            continue
+
+                        # Execute chunk handler
+                        logger.info("Job %s: executing chunk %s", job_id[:8], chunk["chunk_key"])
+                        result = self._execute_chunk(chunk, handler_func)
+
+                        if result == "transient":
+                            # Transient error — job is now WAITING_SOURCE
+                            # Stop processing this job, return to outer scheduler
+                            break
+
+                        # Minimum 1 second between chunks
+                        self._stop_event.wait(1.0)
+
+                # Sleep after ALL jobs checked — not inside the for loop
+                if not found_runnable:
                     self._stop_event.wait(1.0)
 
-            # Sleep after ALL jobs checked — not inside the for loop
-            if not found_runnable:
-                self._stop_event.wait(1.0)
+            except Exception as e:
+                # R5-C3: Never let the worker thread die silently.
+                # Log the error and sleep before retrying.
+                logger.error("Worker loop iteration failed: %s", e, exc_info=True)
+                with self._worker_lock:
+                    self.worker_last_error = str(e)[:500]
+                self._stop_event.wait(5.0)

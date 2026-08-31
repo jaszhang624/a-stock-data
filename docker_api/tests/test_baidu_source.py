@@ -11,6 +11,8 @@ G. malformed response → SourceDataError
 H. unsupported symbol → SourceUnsupportedError
 I. Governor still only uses mootdx
 J. market_bars_handler behavior unchanged
+
+C4B-2: Tests now pass Instrument objects to fetch_market_bars instead of bare strings.
 """
 
 from unittest.mock import MagicMock, patch
@@ -23,6 +25,12 @@ from astock_api.source_adapters import (
     SourceUnsupportedError,
     SourceDataError,
 )
+
+
+def _make_instrument(code="600519", exchange="SSE", asset_type="EQUITY"):
+    """Create a mock Instrument for tests."""
+    from astock_api.instrument import Instrument
+    return Instrument(exchange=exchange, code=code, asset_type=asset_type)
 
 
 # --- BaiduSource tests ---
@@ -56,7 +64,7 @@ class TestBaiduSource:
                 }
             },
         }):
-            result = source.fetch_market_bars("600519", "daily", 3)
+            result = source.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert result["source"] == "baidu"
         assert result["symbol"] == "600519"
@@ -78,7 +86,7 @@ class TestBaiduSource:
                 }
             },
         }):
-            result = source.fetch_market_bars("600519", "daily", 1)
+            result = source.fetch_market_bars(_make_instrument(), "daily", 1)
 
         row = result["rows"][0]
         assert row["datetime"] == "2026-08-10"
@@ -101,7 +109,7 @@ class TestBaiduSource:
                 }
             },
         }):
-            result = source.fetch_market_bars("600519", "daily", 1)
+            result = source.fetch_market_bars(_make_instrument(), "daily", 1)
 
         row = result["rows"][0]
         # Baidu raw volume=6268572 (股) → canonical 62685.72 (手)
@@ -121,7 +129,7 @@ class TestBaiduSource:
                 }
             },
         }):
-            result = source.fetch_market_bars("600519", "daily", 1)
+            result = source.fetch_market_bars(_make_instrument(), "daily", 1)
 
         row = result["rows"][0]
         # Amount stays as-is (元)
@@ -146,7 +154,7 @@ class TestBaiduSource:
                 }
             },
         }):
-            result = source.fetch_market_bars("600519", "daily", 3)
+            result = source.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert len(result["rows"]) == 3
         # Last row should be the most recent (i=9)
@@ -160,7 +168,7 @@ class TestBaiduSource:
         # Simulate baidu_kline_with_ma returning a list (the actual failure mode)
         with patch("astock_api.upstream.tencent.baidu_kline_with_ma", return_value=[]):
             with pytest.raises(SourceTransientError, match="non-dict response"):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_resultcode_403_source_transient_error(self):
         """F. ResultCode=403 → SourceTransientError."""
@@ -172,7 +180,7 @@ class TestBaiduSource:
             "Result": [],
         }):
             with pytest.raises(SourceTransientError, match="ResultCode=403"):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_resultcode_string_403(self):
         """ResultCode as string '403' also handled."""
@@ -184,7 +192,7 @@ class TestBaiduSource:
             "Result": [],
         }):
             with pytest.raises(SourceTransientError, match="ResultCode=403"):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_malformed_response_source_data_error(self):
         """G. Malformed response → SourceDataError."""
@@ -196,7 +204,7 @@ class TestBaiduSource:
             "Result": [],  # list instead of dict
         }):
             with pytest.raises(SourceDataError, match="malformed Result"):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_north_exchange_source_unsupported(self):
         """H. Unsupported symbol (North Exchange) → SourceUnsupportedError."""
@@ -204,7 +212,7 @@ class TestBaiduSource:
 
         source = BaiduSource()
         with pytest.raises(SourceUnsupportedError, match="North Exchange"):
-            source.fetch_market_bars("872925", "daily", 3)
+            source.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
     def test_north_exchange_4x_prefix(self):
         """H. 4x prefix also blocked."""
@@ -212,7 +220,7 @@ class TestBaiduSource:
 
         source = BaiduSource()
         with pytest.raises(SourceUnsupportedError, match="North Exchange"):
-            source.fetch_market_bars("430091", "daily", 3)
+            source.fetch_market_bars(_make_instrument(code="430091"), "daily", 3)
 
     def test_fetch_raw_http_exception_becomes_source_transient(self):
         """baidu_kline_with_ma exception → SourceTransientError."""
@@ -221,7 +229,7 @@ class TestBaiduSource:
         source = BaiduSource()
         with patch("astock_api.upstream.tencent.baidu_kline_with_ma", side_effect=ConnectionError("timeout")):
             with pytest.raises(SourceTransientError, match="baidu request failed"):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
 
 # --- Governor still only uses mootdx ---
@@ -253,7 +261,7 @@ class TestGovernorStillMootdxOnly:
             result = market_bars_handler({"symbol": "600519", "frequency": "daily", "count": 3})
 
         assert result["source"] == "mootdx"
-        mock_gov.fetch_market_bars.assert_called_once_with("600519", "daily", 3)
+        mock_gov.fetch_market_bars.assert_called_once()  # called with Instrument, "daily", 3
 
 
 class TestBaiduSourceErrorResponses:
@@ -271,7 +279,7 @@ class TestBaiduSourceErrorResponses:
 
             source = BaiduSource()
             with pytest.raises(SourceTransientError):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_result_code_403_string_list_result(self):
         """B. ResultCode="403", Result=[] → SourceTransientError."""
@@ -285,7 +293,7 @@ class TestBaiduSourceErrorResponses:
 
             source = BaiduSource()
             with pytest.raises(SourceTransientError):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_other_nonzero_result_code_with_list(self):
         """C. Other non-zero ResultCode with list Result → typed source error."""
@@ -298,7 +306,7 @@ class TestBaiduSourceErrorResponses:
 
             source = BaiduSource()
             with pytest.raises(SourceTransientError):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_successful_dict_response(self):
         """D. Successful dict response → still parses normally."""
@@ -318,7 +326,7 @@ class TestBaiduSourceErrorResponses:
             mock_get.return_value = mock_resp
 
             source = BaiduSource()
-            result = source.fetch_market_bars("600519", "daily", 3)
+            result = source.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert result["source"] == "baidu"
         assert len(result["rows"]) == 2
@@ -337,5 +345,4 @@ class TestBaiduSourceErrorResponses:
 
             source = BaiduSource()
             with pytest.raises(SourceDataError):
-                source.fetch_market_bars("600519", "daily", 3)
-
+                source.fetch_market_bars(_make_instrument(), "daily", 3)

@@ -6,5 +6,7 @@ cache/
 *.tar.gz
 scripts/tmp_blocks/
 .venv-test/
+.venv/
 Dockerfile.broken-*
 release/*.json
+validation_tmp/

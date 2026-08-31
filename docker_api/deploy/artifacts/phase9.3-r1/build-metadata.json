@@ -1,0 +1,58 @@
+{
+  "buildx.build.provenance": {
+    "builder": {
+      "id": ""
+    },
+    "buildType": "https://mobyproject.org/buildkit@v1",
+    "materials": [
+      {
+        "uri": "pkg:docker/a-stock-data-api@281fc69-phase9-2-r2?platform=linux%2Famd64",
+        "digest": {
+          "sha256": "e2cd1e495b702d9c52ddf8b63dfa83c950fa15906006d45dd2503d3336b5cc21"
+        }
+      }
+    ],
+    "invocation": {
+      "configSource": {
+        "entryPoint": "Dockerfile.phase9.3-r1"
+      },
+      "parameters": {
+        "frontend": "dockerfile.v0",
+        "locals": [
+          {
+            "name": "context"
+          },
+          {
+            "name": "dockerfile"
+          }
+        ],
+        "root": {
+          "configSource": {
+            "path": "Dockerfile.phase9.3-r1"
+          },
+          "request": {
+            "args": {
+              "vcs:localdir:context": "docker_api",
+              "vcs:localdir:dockerfile": "docker_api",
+              "vcs:revision": "f9aca92608e66c5488b8d7412ade5b3de6265c36",
+              "vcs:source": "https://github.com/jaszhang624/a-stock-data.git"
+            }
+          }
+        },
+        "compatibilityVersion": 30
+      },
+      "environment": {
+        "dockerfileVersion": "1.26.0",
+        "platform": "linux/arm64"
+      }
+    }
+  },
+  "buildx.build.ref": "desktop-linux/desktop-linux/64hsnvyi4lzdacuopc2wwproy",
+  "containerimage.descriptor": {
+    "mediaType": "application/vnd.oci.image.index.v1+json",
+    "digest": "sha256:27e78e005918aa6b0e55573ba0d14a2ab589205dc26106edfd82bbbba0bc2397",
+    "size": 856
+  },
+  "containerimage.digest": "sha256:27e78e005918aa6b0e55573ba0d14a2ab589205dc26106edfd82bbbba0bc2397",
+  "image.name": "docker.io/library/a-stock-data-api:281fc69-phase9-3-r1"
+}

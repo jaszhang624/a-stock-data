@@ -1,0 +1,31 @@
+{
+  "snapshot_date": "2026-08-23",
+  "regression_baseline": {
+    "passed": 617,
+    "skipped": 2,
+    "new_skips": 0
+  },
+  "components": {
+    "identity_layer": {"status": "PASS", "phase": "R5-C4B"},
+    "universe_v2": {"status": "PASS", "phase": "R6-1", "sha256": "f1011f3888f4e930d9e88de2d5be8083b7cb63ea528eb234add4eb290ebca403", "total_instruments": 5224},
+    "coverage_freshness": {"status": "PASS", "phase": "R6-3"},
+    "reconciliation": {"status": "PASS", "phase": "R6-4"},
+    "update_planner": {"status": "PASS", "phase": "R6-5"},
+    "update_executor": {"status": "PASS", "phase": "R6-6"},
+    "plan_deduplication": {"status": "PASS", "phase": "R6-7A"},
+    "scheduler_orchestration": {"status": "PASS", "phase": "R6-7B"},
+    "run_lifecycle": {"status": "PASS", "phase": "R7"},
+    "burnin_validation": {"status": "PASS", "phase": "R8"},
+    "data_quality": {"status": "PASS", "phase": "R6-9"},
+    "job_engine": {"status": "PASS", "phase": "R5-C3"}
+  },
+  "data_state": {
+    "datasetstore_instruments": 5210,
+    "datasetstore_rows": 1035379,
+    "coverage_with_data": 5210,
+    "coverage_missing": 14,
+    "coverage_current": 1,
+    "coverage_stale": 5209
+  },
+  "sqlite_user_version": 3
+}

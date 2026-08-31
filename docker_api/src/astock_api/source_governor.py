@@ -6,6 +6,7 @@ for the job handler layer.
 
 import threading as _threading
 import time as _time_module
+from typing import Any
 
 from astock_api.source_adapters import (
     MarketBarsSource,
@@ -144,21 +145,25 @@ class SourceGovernor:
         self._health[name]["open_until"] = None
 
     def fetch_market_bars(
-        self, symbol: str, frequency: str, count: int
+        self, instrument: Any, frequency: str, count: int
     ) -> dict:
         """Fetch market bars from the first available source.
 
         Args:
-            symbol: 6-digit A-share code (e.g. '600519').
+            instrument: Instrument object with exchange, code, asset_type.
+                Passed through to adapters for provider-specific conversion.
             frequency: 'daily' (only supported value).
             count: Number of bars to return.
 
         Returns:
-            Result dict with source, symbol, frequency, requested_count, rows.
+            Result dict with source, symbol, canonical_id, exchange, frequency, requested_count, rows.
 
         Raises:
             GovernorUnavailableError: all sources returned transient/data errors or are OPEN/HALF_OPEN.
             GovernorUnsupportedError: no source supports this symbol/market.
+
+        C4B-2: Instrument identity is preserved through the governor chain.
+        The governor does NOT re-infer exchange from code prefix.
         """
         errors: list[SourceError] = []
 
@@ -173,9 +178,11 @@ class SourceGovernor:
 
                 if state == "HALF_OPEN":
                     # Another request is already probing — skip.
-                    errors.append(SourceTransientError(
+                    err = SourceTransientError(
                         f"{name} is HALF_OPEN (probe in progress)"
-                    ))
+                    )
+                    err.source_name = name
+                    errors.append(err)
                     continue
 
                 if state == "OPEN":
@@ -185,14 +192,16 @@ class SourceGovernor:
                         self._persist(name)
                     else:
                         # Still in cooldown — skip adapter, treat as unavailable.
-                        errors.append(SourceTransientError(
+                        err = SourceTransientError(
                             f"{name} is OPEN (consecutive_failures={health['consecutive_failures']})"
-                        ))
+                        )
+                        err.source_name = name
+                        errors.append(err)
                         continue
 
             # ── Call adapter (outside lock) ───────────────────────
             try:
-                result = source.fetch_market_bars(symbol, frequency, count)
+                result = source.fetch_market_bars(instrument, frequency, count)
 
                 # ── Write probe result (thread-safe) ─────────────
                 with lock:
@@ -203,6 +212,8 @@ class SourceGovernor:
 
             except SourceUnsupportedError as e:
                 # Unsupported does NOT count as a health failure.
+                if not e.source_name:
+                    e.source_name = name
                 with lock:
                     if health["state"] == "HALF_OPEN":
                         # Probe was unsupported — back to OPEN.
@@ -210,8 +221,10 @@ class SourceGovernor:
                         self._persist(name)
                 errors.append(e)
 
-            except SourceError as e:
-                # Transient / Data error — increment consecutive failures.
+            except SourceTransientError as e:
+                # Transient error — increment consecutive failures.
+                if not e.source_name:
+                    e.source_name = name
                 with lock:
                     health["consecutive_failures"] += 1
                     if health["consecutive_failures"] >= self.OPEN_THRESHOLD:
@@ -219,19 +232,38 @@ class SourceGovernor:
                     self._persist(name)
                 errors.append(e)
 
+            except SourceDataError as e:
+                # Data error — does NOT trigger circuit breaker.
+                if not e.source_name:
+                    e.source_name = name
+                with lock:
+                    if health["state"] == "HALF_OPEN":
+                        # Probe succeeded in reaching the source — data issue is not a health concern.
+                        self._set_closed(name)
+                        self._persist(name)
+                errors.append(e)
+
         # All sources failed — distinguish unsupported vs unavailable.
-        # Only GovernorUnsupportedError if ALL sources returned SourceUnsupportedError.
-        # If any source returned a transient/data error (or was OPEN/HALF_OPEN), the request is valid but sources are unavailable.
-        if errors and all(
-            isinstance(e, SourceUnsupportedError) for e in errors
-        ):
+        # GovernorUnsupportedError if ALL errors are non-transient (unsupported or definitive data errors).
+        # Only GovernorUnavailableError if at least one source returned a transient error.
+        has_transient = any(
+            isinstance(e, SourceTransientError) for e in errors
+        )
+
+        if not has_transient:
+            # All sources returned unsupported or data errors — symbol simply has no data.
+            # This is a permanent condition; retrying will not help.
             raise GovernorUnsupportedError(
-                f"no source supports symbol {symbol}: {[str(e) for e in errors]}",
+                f"no data available for symbol {instrument.code}: {[str(e) for e in errors]}",
                 source_errors=errors,
             )
 
+        # Has transient errors — check if any source gave a definitive "no data" answer.
+        # mootdx EMPTY (definitive) + baidu OPEN → GovernorUnavailableError (WAITING_SOURCE).
+        # The mootdx answer is authoritative, but baidu OPEN means we haven't checked baidu yet.
+        # Don't permanently fail; wait for baidu cooldown to expire and retry.
         raise GovernorUnavailableError(
-            f"all sources unavailable for {symbol}: {[str(e) for e in errors]}",
+            f"all sources unavailable for {instrument.code}: {[str(e) for e in errors]}",
             source_errors=errors,
         )
 

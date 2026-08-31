@@ -8,6 +8,8 @@ D. schema unchanged (7 columns)
 E. mootdx exception → source-level error → TransientJobError
 F. invalid request → PermanentJobError
 G. source_adapters has no dependency on job_engine exceptions
+
+C4B-2: Tests now pass Instrument objects to fetch_market_bars instead of bare strings.
 """
 
 from unittest.mock import MagicMock, patch
@@ -21,6 +23,12 @@ from astock_api.source_adapters import (
     SourceDataError,
 )
 from astock_api.source_governor import GovernorUnavailableError, GovernorUnsupportedError
+
+
+def _make_instrument(code="600519", exchange="SSE", asset_type="EQUITY"):
+    """Create a mock Instrument for tests."""
+    from astock_api.instrument import Instrument
+    return Instrument(exchange=exchange, code=code, asset_type=asset_type)
 
 
 # --- Source adapter tests ---
@@ -50,7 +58,7 @@ class TestMootdxSource:
 
         source = MootdxSource()
         with patch.object(source, "_get_client", return_value=mock_client):
-            result = source.fetch_market_bars("600519", "daily", 3)
+            result = source.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert result["source"] == "mootdx"
         assert result["symbol"] == "600519"
@@ -68,7 +76,7 @@ class TestMootdxSource:
         source = MootdxSource()
         with patch.object(source, "_get_client", return_value=mock_client):
             with pytest.raises(SourceDataError, match="empty bars"):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_missing_columns_raises_source_data_error(self):
         """E. mootdx missing columns → SourceDataError."""
@@ -84,7 +92,7 @@ class TestMootdxSource:
         source = MootdxSource()
         with patch.object(source, "_get_client", return_value=mock_client):
             with pytest.raises(SourceDataError, match="missing columns"):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_client_exception_raises_source_transient(self):
         """E. mootdx client exception → SourceTransientError."""
@@ -93,7 +101,7 @@ class TestMootdxSource:
         source = MootdxSource()
         with patch.object(source, "_get_client", side_effect=ConnectionError("refused")):
             with pytest.raises(SourceTransientError, match="client unavailable"):
-                source.fetch_market_bars("600519", "daily", 3)
+                source.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_no_job_engine_import(self):
         """E. source_adapters does not import job_engine exceptions."""
@@ -149,7 +157,7 @@ class TestSourceGovernor:
         g.register(mock_mootdx)
         g.register(mock_baidu)
 
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert result["source"] == "mootdx"
         mock_mootdx.fetch_market_bars.assert_called_once()
@@ -174,7 +182,7 @@ class TestSourceGovernor:
         g.register(mock_mootdx)
         g.register(mock_baidu)
 
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert result["source"] == "baidu"
         mock_mootdx.fetch_market_bars.assert_called_once()
@@ -199,7 +207,7 @@ class TestSourceGovernor:
         g.register(mock_mootdx)
         g.register(mock_baidu)
 
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert result["source"] == "baidu"
         mock_mootdx.fetch_market_bars.assert_called_once()
@@ -224,7 +232,7 @@ class TestSourceGovernor:
         g.register(mock_mootdx)
         g.register(mock_baidu)
 
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert result["source"] == "baidu"
         mock_mootdx.fetch_market_bars.assert_called_once()
@@ -247,7 +255,7 @@ class TestSourceGovernor:
         g.register(mock_baidu)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert mock_mootdx.fetch_market_bars.call_count == 1
         assert mock_baidu.fetch_market_bars.call_count == 1
@@ -277,7 +285,7 @@ class TestSourceGovernor:
         g.register(mock_mootdx)
         g.register(mock_baidu)
 
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert result["source"] == "baidu"
         assert result["symbol"] == "600519"
@@ -319,7 +327,7 @@ class TestHealthCounters:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         health = g.get_source_health("mootdx")
         assert health["consecutive_failures"] == 1
@@ -337,10 +345,10 @@ class TestHealthCounters:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         health = g.get_source_health("mootdx")
         assert health["consecutive_failures"] == 2
@@ -358,10 +366,10 @@ class TestHealthCounters:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         health = g.get_source_health("mootdx")
         assert health["open_until"] == 1030.0
@@ -379,10 +387,10 @@ class TestHealthCounters:
 
         # Fail twice to OPEN (open_until = 1030.0)
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         call_count_before = mock_source.fetch_market_bars.call_count
 
@@ -390,7 +398,7 @@ class TestHealthCounters:
         g.now_fn = lambda: 1029.0
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # Adapter not called
         assert mock_source.fetch_market_bars.call_count == call_count_before
@@ -407,10 +415,10 @@ class TestHealthCounters:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         call_count_before = mock_source.fetch_market_bars.call_count
 
@@ -418,7 +426,7 @@ class TestHealthCounters:
         g.now_fn = lambda: 1029.0
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert mock_source.fetch_market_bars.call_count == call_count_before
 
@@ -434,10 +442,10 @@ class TestHealthCounters:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         call_count_before = mock_source.fetch_market_bars.call_count
 
@@ -445,7 +453,7 @@ class TestHealthCounters:
         g.now_fn = lambda: 1030.0
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # Adapter WAS called
         assert mock_source.fetch_market_bars.call_count == call_count_before + 1
@@ -468,10 +476,10 @@ class TestHealthCounters:
 
         from astock_api.source_governor import GovernorUnavailableError
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["state"] == "OPEN"
         assert g.get_source_health("mootdx")["open_until"] == 1030.0
@@ -479,7 +487,7 @@ class TestHealthCounters:
         # Advance past cooldown, then succeed
         g.now_fn = lambda: 1030.0
 
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
         assert result["source"] == "mootdx"
 
         health = g.get_source_health("mootdx")
@@ -499,10 +507,10 @@ class TestHealthCounters:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["open_until"] == 1030.0
 
@@ -510,7 +518,7 @@ class TestHealthCounters:
         g.now_fn = lambda: 1030.0
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # Re-OPEN with new open_until
         health = g.get_source_health("mootdx")
@@ -518,8 +526,8 @@ class TestHealthCounters:
         assert health["open_until"] == 1060.0
 
     def test_cooldown_expired_data_error_reopens(self):
-        """G. Cooldown expired + DataError → re-OPEN."""
-        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
+        """G. Cooldown expired + DataError → CLOSED (source reachable, data issue is not health concern)."""
+        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError, GovernorUnsupportedError
 
         mock_source = MagicMock()
         mock_source.name = "mootdx"
@@ -534,19 +542,22 @@ class TestHealthCounters:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
-        # Advance past cooldown
+        # Advance past cooldown → HALF_OPEN probe
         g.now_fn = lambda: 1030.0
 
-        with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+        # DataError only → GovernorUnsupportedError (no transient errors)
+        with pytest.raises(GovernorUnsupportedError):
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
+        # DataError does NOT trigger OPEN — source reached, data issue is not a health concern.
+        # HALF_OPEN probe with DataError → CLOSED (source is reachable).
         health = g.get_source_health("mootdx")
-        assert health["state"] == "OPEN"
+        assert health["state"] == "CLOSED"
 
     def test_unsupported_does_not_open(self):
         """E. Unsupported does not increase failures or OPEN."""
@@ -560,7 +571,7 @@ class TestHealthCounters:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnsupportedError):
-            g.fetch_market_bars("872925", "daily", 3)
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
         health = g.get_source_health("baidu")
         assert health["consecutive_failures"] == 0
@@ -579,17 +590,17 @@ class TestHealthCounters:
 
         # Fail twice to OPEN
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["state"] == "OPEN"
         call_count_before = mock_source.fetch_market_bars.call_count
 
         # Third request — still in cooldown, adapter should NOT be called
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert mock_source.fetch_market_bars.call_count == call_count_before
 
@@ -617,10 +628,10 @@ class TestHealthCounters:
 
         # Fail both twice to OPEN mootdx (and baidu)
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["state"] == "OPEN"
 
@@ -629,7 +640,7 @@ class TestHealthCounters:
         g._health["baidu"]["consecutive_failures"] = 0
 
         # Next request: mootdx OPEN → Baidu succeeds
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
         assert result["source"] == "baidu"
 
     def test_mootdx_open_baidu_unsupported_gives_unavailable(self):
@@ -650,16 +661,16 @@ class TestHealthCounters:
 
         # Fail mootdx twice to OPEN
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("872925", "daily", 3)
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("872925", "daily", 3)
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
         assert g.get_source_health("mootdx")["state"] == "OPEN"
 
         # mootdx OPEN + Baidu Unsupported → GovernorUnavailableError (NOT Unsupported)
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("872925", "daily", 3)
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
     def test_both_sources_open(self):
         """I. Both sources OPEN → GovernorUnavailableError."""
@@ -679,17 +690,17 @@ class TestHealthCounters:
 
         # Fail both twice to OPEN
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["state"] == "OPEN"
         assert g.get_source_health("baidu")["state"] == "OPEN"
 
         # Both OPEN → GovernorUnavailableError
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_success_resets_to_closed(self):
         """J. Non-OPEN source success → failures=0, state=CLOSED."""
@@ -708,13 +719,13 @@ class TestHealthCounters:
 
         from astock_api.source_governor import GovernorUnavailableError
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["consecutive_failures"] == 1
         assert g.get_source_health("mootdx")["state"] == "CLOSED"
 
         # Success
-        g.fetch_market_bars("600519", "daily", 3)
+        g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         health = g.get_source_health("mootdx")
         assert health["consecutive_failures"] == 0
@@ -744,10 +755,10 @@ class TestHealthCounters:
 
         # Fail both twice to OPEN mootdx (and baidu)
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["state"] == "OPEN"
         # Reset Baidu to CLOSED so it can succeed (simulate recovery)
@@ -755,7 +766,7 @@ class TestHealthCounters:
         g._health["baidu"]["consecutive_failures"] = 0
 
         # mootdx OPEN, Baidu succeeds
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
         assert result["source"] == "baidu"
 
         # Baidu health unaffected by mootdx OPEN
@@ -789,17 +800,17 @@ class TestHealthCounters:
 
         # Fail both twice to OPEN
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["state"] == "OPEN"
 
         # Advance past cooldown — mootdx succeeds, becomes primary again
         g.now_fn = lambda: 1030.0
 
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
         assert result["source"] == "mootdx"
 
     def test_get_health_unknown_source(self):
@@ -822,16 +833,16 @@ class TestHealthCounters:
 
         from astock_api.source_governor import GovernorUnavailableError
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # Advance clock without sleeping
         g.now_fn = lambda: 1030.0
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # Verify no real time passed (clock is fake)
         assert g.now_fn() == 1030.0
@@ -848,17 +859,17 @@ class TestHealthCounters:
 
         g = SourceGovernor()
         g.register(mock_source)
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert result["source"] == "mootdx"
-        mock_source.fetch_market_bars.assert_called_once_with("600519", "daily", 3)
+        mock_source.fetch_market_bars.assert_called_once()  # called with Instrument, "daily", 3
 
     def test_no_sources_raises_governor_error(self):
-        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
+        from astock_api.source_governor import SourceGovernor, GovernorUnsupportedError
 
         g = SourceGovernor()
-        with pytest.raises(GovernorUnavailableError, match="all sources unavailable"):
-            g.fetch_market_bars("600519", "daily", 3)
+        with pytest.raises(GovernorUnsupportedError, match="no data available"):
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_source_transient_error_becomes_governor_unavailable(self):
         from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
@@ -871,7 +882,7 @@ class TestHealthCounters:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError, match="server down"):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
     def test_source_unsupported_error_becomes_governor_unsupported(self):
         from astock_api.source_governor import SourceGovernor, GovernorUnsupportedError
@@ -884,7 +895,7 @@ class TestHealthCounters:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnsupportedError, match="north exchange"):
-            g.fetch_market_bars("872925", "daily", 3)
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
     def test_transient_plus_unsupported_becomes_unavailable(self):
         """Scenario A: Transient + Unsupported → GovernorUnavailableError."""
@@ -903,7 +914,7 @@ class TestHealthCounters:
         g.register(mock_baidu)
 
         with pytest.raises(GovernorUnavailableError, match="all sources unavailable"):
-            g.fetch_market_bars("872925", "daily", 3)
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
     def test_unsupported_plus_unsupported_becomes_unsupported(self):
         """Scenario B: Unsupported + Unsupported → GovernorUnsupportedError."""
@@ -921,12 +932,12 @@ class TestHealthCounters:
         g.register(mock_mootdx)
         g.register(mock_baidu)
 
-        with pytest.raises(GovernorUnsupportedError, match="no source supports"):
-            g.fetch_market_bars("872925", "daily", 3)
+        with pytest.raises(GovernorUnsupportedError, match="no data available"):
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
-    def test_data_plus_unsupported_becomes_unavailable(self):
-        """Scenario C: DataError + Unsupported → GovernorUnavailableError."""
-        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
+    def test_data_plus_unsupported_becomes_unsupported(self):
+        """Scenario C: DataError + Unsupported → GovernorUnsupportedError (no transient errors = no data)."""
+        from astock_api.source_governor import SourceGovernor, GovernorUnsupportedError
 
         mock_mootdx = MagicMock()
         mock_mootdx.name = "mootdx"
@@ -940,11 +951,11 @@ class TestHealthCounters:
         g.register(mock_mootdx)
         g.register(mock_baidu)
 
-        with pytest.raises(GovernorUnavailableError, match="all sources unavailable"):
-            g.fetch_market_bars("872925", "daily", 3)
+        with pytest.raises(GovernorUnsupportedError, match="no data available"):
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
     def test_transient_plus_data_becomes_unavailable(self):
-        """Scenario D: Transient + DataError → GovernorUnavailableError."""
+        """Scenario D: Transient + DataError (definitive=False) → GovernorUnavailableError."""
         from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
 
         mock_mootdx = MagicMock()
@@ -953,14 +964,14 @@ class TestHealthCounters:
 
         mock_baidu = MagicMock()
         mock_baidu.name = "baidu"
-        mock_baidu.fetch_market_bars.side_effect = SourceDataError("malformed")
+        mock_baidu.fetch_market_bars.side_effect = SourceDataError("malformed", definitive=False)
 
         g = SourceGovernor()
         g.register(mock_mootdx)
         g.register(mock_baidu)
 
         with pytest.raises(GovernorUnavailableError, match="all sources unavailable"):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
 
 # --- Handler integration tests ---
@@ -984,7 +995,7 @@ class TestMarketBarsHandler:
             result = market_bars_handler({"symbol": "600519", "frequency": "daily", "count": 3})
 
         assert result == mock_result
-        mock_gov.fetch_market_bars.assert_called_once_with("600519", "daily", 3)
+        mock_gov.fetch_market_bars.assert_called_once()  # called with Instrument, "daily", 3
 
     def test_handler_source_is_mootdx(self):
         with patch(
@@ -1132,7 +1143,7 @@ class TestSharedGovernor:
 
                 # Call 1: mootdx fails → failures=1
                 try:
-                    gov.fetch_market_bars("600519", "daily", 3)
+                    gov.fetch_market_bars(_make_instrument(), "daily", 3)
                 except GovernorUnavailableError:
                     pass
 
@@ -1141,7 +1152,7 @@ class TestSharedGovernor:
 
                 # Call 2: mootdx fails → failures=2, OPEN
                 try:
-                    gov.fetch_market_bars("600519", "daily", 3)
+                    gov.fetch_market_bars(_make_instrument(), "daily", 3)
                 except GovernorUnavailableError:
                     pass
 
@@ -1170,10 +1181,10 @@ class TestHalfOpen:
 
         # Fail twice to OPEN (open_until = 1030.0)
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["state"] == "OPEN"
 
@@ -1184,7 +1195,7 @@ class TestHalfOpen:
              "requested_count": 3, "rows": []},
         ]
 
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
         assert result["source"] == "mootdx"
 
     def test_half_open_probe_success_closes(self):
@@ -1204,15 +1215,15 @@ class TestHalfOpen:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # Advance past cooldown
         g.now_fn = lambda: 1030.0
 
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
         assert result["source"] == "mootdx"
 
         health = g.get_source_health("mootdx")
@@ -1232,24 +1243,24 @@ class TestHalfOpen:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # Advance past cooldown, fail again
         g.now_fn = lambda: 1030.0
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         health = g.get_source_health("mootdx")
         assert health["state"] == "OPEN"
         assert health["open_until"] == 1060.0
 
-    def test_half_open_data_error_reopens(self):
-        """D. HALF_OPEN DataError → OPEN."""
-        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError
+    def test_half_open_data_error_closes(self):
+        """D. HALF_OPEN DataError → CLOSED (source reachable, data issue is not health concern)."""
+        from astock_api.source_governor import SourceGovernor, GovernorUnavailableError, GovernorUnsupportedError
 
         mock_source = MagicMock()
         mock_source.name = "mootdx"
@@ -1263,17 +1274,19 @@ class TestHalfOpen:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         g.now_fn = lambda: 1030.0
 
-        with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+        # DataError only → GovernorUnsupportedError (no transient errors)
+        with pytest.raises(GovernorUnsupportedError):
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
-        assert g.get_source_health("mootdx")["state"] == "OPEN"
+        # DataError does NOT trigger OPEN — source reached, data issue is not a health concern.
+        assert g.get_source_health("mootdx")["state"] == "CLOSED"
 
     def test_half_open_unsupported_reopens_no_failure_increment(self):
         """E. HALF_OPEN Unsupported → OPEN, failures not incremented."""
@@ -1292,10 +1305,10 @@ class TestHalfOpen:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("872925", "daily", 3)
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("872925", "daily", 3)
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
         assert g.get_source_health("mootdx")["consecutive_failures"] == 2
 
@@ -1304,7 +1317,7 @@ class TestHalfOpen:
 
         # Single source + unsupported → GovernorUnsupportedError
         with pytest.raises(GovernorUnsupportedError):
-            g.fetch_market_bars("872925", "daily", 3)
+            g.fetch_market_bars(_make_instrument(code="872925"), "daily", 3)
 
         # failures should still be 2 (not incremented by unsupported)
         assert g.get_source_health("mootdx")["consecutive_failures"] == 2
@@ -1352,10 +1365,10 @@ class TestHalfOpen:
 
         # Fail both twice to OPEN
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # Reset baidu to CLOSED so it can succeed as fallback
         g._health["baidu"]["state"] = "CLOSED"
@@ -1371,7 +1384,7 @@ class TestHalfOpen:
 
         def thread1():
             try:
-                results.append(g.fetch_market_bars("600519", "daily", 3))
+                results.append(g.fetch_market_bars(_make_instrument(), "daily", 3))
             except GovernorUnavailableError:
                 results.append("unavailable")
 
@@ -1382,7 +1395,7 @@ class TestHalfOpen:
         probe_in_progress.wait(timeout=5)
 
         # Thread 2: should see HALF_OPEN and skip mootdx, fallback to Baidu
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
         assert result["source"] == "baidu"
 
         # Release the probe so thread 1 can finish
@@ -1436,10 +1449,10 @@ class TestHalfOpen:
 
         # Fail both twice to OPEN (open_until = 1030.0)
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # Reset baidu to CLOSED so it can succeed as fallback
         g._health["baidu"]["state"] = "CLOSED"
@@ -1453,7 +1466,7 @@ class TestHalfOpen:
 
         def worker(idx):
             try:
-                results[idx] = g.fetch_market_bars("600519", "daily", 3)
+                results[idx] = g.fetch_market_bars(_make_instrument(), "daily", 3)
             except GovernorUnavailableError:
                 results[idx] = "unavailable"
             except Exception as e:
@@ -1508,16 +1521,16 @@ class TestHalfOpen:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # now=1029 (not expired) — still skip
         g.now_fn = lambda: 1029.0
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["state"] == "OPEN"
         # Adapter not called during cooldown
@@ -1549,15 +1562,15 @@ class TestHalfOpen:
 
         # Fail both twice to OPEN
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         # Advance past cooldown — mootdx succeeds on probe
         g.now_fn = lambda: 1030.0
 
-        result = g.fetch_market_bars("600519", "daily", 3)
+        result = g.fetch_market_bars(_make_instrument(), "daily", 3)
         assert result["source"] == "mootdx"
 
         # mootdx is now CLOSED and primary again
@@ -1579,7 +1592,7 @@ class TestGovernorPersistence:
         g.register(mock_source)
 
         with pytest.raises(GovernorUnavailableError):
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
         assert g.get_source_health("mootdx")["consecutive_failures"] == 1
         assert g.get_source_health("mootdx")["state"] == "CLOSED"
@@ -1601,7 +1614,7 @@ class TestGovernorPersistence:
             g.register(mock_source)
 
             with pytest.raises(GovernorUnavailableError):
-                g.fetch_market_bars("600519", "daily", 3)
+                g.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # Verify DB has the state
             stored = store.load("mootdx", "market_bars_daily")
@@ -1625,7 +1638,7 @@ class TestGovernorPersistence:
             g1.register(mock_source1)
 
             with pytest.raises(GovernorUnavailableError):
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # New Governor loads from same DB
             mock_source2 = MagicMock()
@@ -1652,10 +1665,10 @@ class TestGovernorPersistence:
             g.register(mock_source)
 
             with pytest.raises(GovernorUnavailableError):
-                g.fetch_market_bars("600519", "daily", 3)
+                g.fetch_market_bars(_make_instrument(), "daily", 3)
 
             with pytest.raises(GovernorUnavailableError):
-                g.fetch_market_bars("600519", "daily", 3)
+                g.fetch_market_bars(_make_instrument(), "daily", 3)
 
             stored = store.load("mootdx", "market_bars_daily")
             assert stored["state"] == "OPEN"
@@ -1679,10 +1692,10 @@ class TestGovernorPersistence:
             g1.register(mock_source1)
 
             with pytest.raises(GovernorUnavailableError):
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             with pytest.raises(GovernorUnavailableError):
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # New Governor loads OPEN state
             mock_source2 = MagicMock()
@@ -1714,9 +1727,9 @@ class TestGovernorPersistence:
             g.register(mock_source)
 
             with pytest.raises(GovernorUnavailableError):
-                g.fetch_market_bars("600519", "daily", 3)
+                g.fetch_market_bars(_make_instrument(), "daily", 3)
 
-            g.fetch_market_bars("600519", "daily", 3)
+            g.fetch_market_bars(_make_instrument(), "daily", 3)
 
             stored = store.load("mootdx", "market_bars_daily")
             assert stored["state"] == "CLOSED"
@@ -1748,7 +1761,7 @@ class TestGovernorPersistence:
             g.register(mock_baidu)
 
             # mootdx fails, baidu succeeds as fallback
-            result = g.fetch_market_bars("600519", "daily", 3)
+            result = g.fetch_market_bars(_make_instrument(), "daily", 3)
             assert result["source"] == "baidu"
 
             mootdx_stored = store.load("mootdx", "market_bars_daily")
@@ -1775,16 +1788,16 @@ class TestGovernorPersistence:
 
             # Two failures → OPEN
             with pytest.raises(GovernorUnavailableError):
-                g.fetch_market_bars("600519", "daily", 3)
+                g.fetch_market_bars(_make_instrument(), "daily", 3)
 
             with pytest.raises(GovernorUnavailableError):
-                g.fetch_market_bars("600519", "daily", 3)
+                g.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # Advance past cooldown, trigger HALF_OPEN
             g.now_fn = lambda: 1030.0
 
             with pytest.raises(GovernorUnavailableError):
-                g.fetch_market_bars("600519", "daily", 3)
+                g.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # DB should have OPEN (probe failed → back to OPEN)
             stored = store.load("mootdx", "market_bars_daily")
@@ -1835,7 +1848,7 @@ class TestRestartRecovery:
             g1.register(mock_source1)
 
             with pytest.raises(GovernorUnavailableError):
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # Simulate restart — new Governor loads from same DB
             store2 = SQLiteSourceStateStore(db_path)
@@ -1865,10 +1878,10 @@ class TestRestartRecovery:
             g1.register(mock_source1)
 
             with pytest.raises(GovernorUnavailableError):
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             with pytest.raises(GovernorUnavailableError):
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # Restart
             store2 = SQLiteSourceStateStore(db_path)
@@ -1899,10 +1912,10 @@ class TestRestartRecovery:
             g1.register(mock_source1)
 
             with pytest.raises(GovernorUnavailableError):
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             with pytest.raises(GovernorUnavailableError):
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # Restart with same time (cooldown not expired, open_until=1030)
             store2 = SQLiteSourceStateStore(db_path)
@@ -1914,7 +1927,7 @@ class TestRestartRecovery:
 
             # Should still be OPEN, skip adapter
             with pytest.raises(GovernorUnavailableError):
-                g2.fetch_market_bars("600519", "daily", 3)
+                g2.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # Adapter not called
             mock_source2.fetch_market_bars.assert_not_called()
@@ -1937,10 +1950,10 @@ class TestRestartRecovery:
             g1.register(mock_source1)
 
             with pytest.raises(GovernorUnavailableError):
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             with pytest.raises(GovernorUnavailableError):
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # Restart with time past cooldown (open_until=1030, now=1035)
             store2 = SQLiteSourceStateStore(db_path)
@@ -1955,7 +1968,7 @@ class TestRestartRecovery:
             g2.register(mock_source2)
 
             # Should enter HALF_OPEN probe and succeed
-            result = g2.fetch_market_bars("600519", "daily", 3)
+            result = g2.fetch_market_bars(_make_instrument(), "daily", 3)
             assert result["source"] == "mootdx"
 
     def test_restart_half_open_recovers_to_open(self):
@@ -2058,7 +2071,7 @@ class TestRestartRecovery:
             g1 = SourceGovernor(now_fn=lambda: 1000.0, state_store=store1)
             g1.register(mock_source1)
 
-            g1.fetch_market_bars("600519", "daily", 3)
+            g1.fetch_market_bars(_make_instrument(), "daily", 3)
 
             # Restart
             store2 = SQLiteSourceStateStore(db_path)
@@ -2090,12 +2103,12 @@ class TestRestartRecovery:
 
             # Fail twice to OPEN
             try:
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
             except Exception:
                 pass
 
             try:
-                g1.fetch_market_bars("600519", "daily", 3)
+                g1.fetch_market_bars(_make_instrument(), "daily", 3)
             except Exception:
                 pass
 

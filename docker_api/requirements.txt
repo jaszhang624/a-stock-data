@@ -7,3 +7,6 @@ stockstats
 # API layer
 fastapi>=0.100,<1
 uvicorn[standard]>=0.23,<1
+
+# Dataset Store (Phase 9.3)
+duckdb==1.1.3
