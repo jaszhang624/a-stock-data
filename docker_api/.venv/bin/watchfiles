@@ -1,6 +1,0 @@
-#!/Users/zhanghuiyuan/Projects/a-stock-data/.worktrees/phase9-2-source-governor/docker_api/.venv/bin/python3.12
-import sys
-from watchfiles.cli import cli
-if __name__ == '__main__':
-    sys.argv[0] = sys.argv[0].removesuffix('.exe')
-    sys.exit(cli())
