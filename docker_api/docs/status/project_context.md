@@ -1,7 +1,7 @@
 # Project Context — a-stock-data
 
 **Purpose of this file:** Stable, maintainable project context for future coding sessions.
-**Last verified:** 2026-08-28 (P9.4 Step 3 verified; P9.4 Step 1 `55c005d`, branch `phase9.3-dataset-foundation`).
+**Last verified:** 2026-08-31 (P9.4 closure verified; P9.4 Step 2 + Step 3 committed as `1a14a12`, branch `phase9.3-dataset-foundation`).
 **Companion files:** `current_architecture.md` (frozen architecture snapshot), `current_state.json` (data-state snapshot), `development_state.md` (rolling status).
 
 ---
@@ -138,8 +138,8 @@ rollback = pointer switch back to previous ACTIVE snapshot
 | R8 | Burn-in validation, operation report | PASS |
 | P9.3-A/B/C | Security master: foundation, coverage switch, refresh pipeline | COMPLETE |
 | P9.4 Step 1 | Update cycle scheduler primitive (in-memory trigger) | COMPLETE (`55c005d`) |
-| P9.4 Step 2 | FastAPI lifecycle wiring (`UpdateCycleService`, `main.py`, `config.py`) | VERIFIED — 11/11 service tests; 680 passed / 2 skipped full regression. Uncommitted. |
-| P9.4 Step 3 | Durable trigger-state persistence (`run_lifecycle` `update_cycle_state` table, separate from `update_runs`; `UpdateCycleService` load/save-before-callback) | VERIFIED — 19/19 trigger-state tests; 699 passed / 2 skipped full regression. Uncommitted. |
+| P9.4 Step 2 | FastAPI lifecycle wiring (`UpdateCycleService`, `main.py`, `config.py`) | COMPLETE — 11/11 service tests; 680 passed / 2 skipped full regression at the time. Committed in `1a14a12`. |
+| P9.4 Step 3 | Durable trigger-state persistence (`run_lifecycle` `update_cycle_state` table, separate from `update_runs`; `UpdateCycleService` load/save-before-callback) | COMPLETE — 19/19 trigger-state tests; 699 passed / 2 skipped full regression at the time. Committed in `1a14a12`. |
 
 ---
 *This file is meant to be stable: update it only when the architecture, module layout, or milestone history changes. For day-to-day status, maintain `development_state.md` instead.*

@@ -124,7 +124,7 @@ Default **off** until wired and regression-tested, consistent with the project's
 
 *Files inspected: `update_cycle_scheduler.py` (90 lines), `scheduler.py` (168 lines), `tests/test_update_cycle_scheduler.py` (85 lines), `docs/status/{project_context,development_state,current_architecture}.md`, grep of `docker_api/src` + `docker_api/tests`. No other modules scanned; no code modified.*
 
-## Status: Implementation Complete (P9.4 Step 2, uncommitted)
+## Status: Implementation Complete (P9.4 Step 2, committed in `1a14a12`)
 
 **Implemented 2026-08-26:**
 
@@ -139,7 +139,7 @@ Default **off** until wired and regression-tested, consistent with the project's
 - Full regression: `pytest tests/` → **680 passed, 2 skipped** (2 skips = Docker-only tests). Up from 617 baseline.
 - Signature cross-check: service closure `run_update_cycle(self.store, self.engine, self.universe_path, reference_date=self.reference_date)` matches `run_update_cycle(store, engine, universe_path, reference_date=None, output_dir=None)`. ✅
 
-**P9.4 Step 3 (2026-08-28, uncommitted, corrected) — durable trigger-state persistence:**
+**P9.4 Step 3 (2026-08-28, committed in `1a14a12`, corrected) — durable trigger-state persistence:**
 - **Durable state:** the trigger instant is persisted in the JobEngine SQLite DB — in a
   **dedicated `update_cycle_state` table** (same DB as the run lifecycle, but a separate
   table so `update_runs` holds only real lifecycle runs and generic readers never surface
@@ -169,5 +169,5 @@ Default **off** until wired and regression-tested, consistent with the project's
   run_lifecycle + scheduler_state + source_state_store + run_verifier + r7_audit) 88/88; full
   `docker_api` regression **699 passed, 2 skipped** (up from 691 at Step 3's first pass).
 
-**P9.4 Step 3 (trigger-state persistence) is complete** — uncommitted, verified and ready
-to commit alongside Step 2.
+**P9.4 Step 3 (trigger-state persistence) is complete** — committed in `1a14a12` alongside
+Step 2.

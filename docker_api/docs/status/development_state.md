@@ -1,14 +1,14 @@
 # Development State — a-stock-data
 
 **Purpose of this file:** Rolling, up-to-date status snapshot. Update this file when development progress changes.
-**Last verified:** 2026-08-28 (P9.4 Step 3 verified; P9.4 Step 1 `55c005d`, branch `phase9.3-dataset-foundation`).
+**Last verified:** 2026-08-31 (P9.4 closure verified; P9.4 Step 2 + Step 3 committed as `1a14a12`, branch `phase9.3-dataset-foundation`).
 **Companion files:** `project_context.md` (stable project context), `current_architecture.md` (frozen architecture snapshot), `current_state.json` (data-state snapshot).
 
 ---
 
 ## 1. Current Phase
 
-**Phase 9.4 — Automated Update Cycle (in progress).**
+**Phase 9.4 — Automated Update Cycle (complete, pending commit).**
 
 Phase 9.3 (Dataset Foundation: security master + DuckDB data plane) is complete.
 Phase 9.4 has all three steps done:
@@ -22,26 +22,26 @@ Phase 9.4 has all three steps done:
   a daemon-thread loop off the asyncio event loop, with a skip-not-wait single-flight
   guard, idempotent start/stop, and stop-before-engine teardown ordering. Config knobs
   `UPDATE_CYCLE_ENABLED` (default **off**), `UPDATE_CYCLE_INTERVAL_MIN` (1440), and
-  `UPDATE_CYCLE_TICK_SECONDS` (60). Verified: 11/11 service tests pass. **Uncommitted.**
+  `UPDATE_CYCLE_TICK_SECONDS` (60). Verified: 11/11 service tests pass. Committed in `1a14a12`.
 - ✅ **P9.4 Step 3** — trigger-state persistence: the trigger instant now survives
   service restarts. `UpdateCycleService` loads it from the JobEngine DB (`run_lifecycle`
   `update_cycle_state` table, a dedicated singleton row separate from `update_runs`) on
   construction and saves it *before* the cycle callback begins (so a crash mid-cycle
   cannot lose the trigger). A restart before the interval no longer re-triggers; after
   the interval it becomes due again. First-run / disabled / corrupt-state / write-failure
-  semantics are preserved. Verified: 19/19 trigger-state tests pass. **Uncommitted.**
+  semantics are preserved. Verified: 19/19 trigger-state tests pass. Committed in `1a14a12`.
 
 ## 2. Current Status
 
-- **Working tree:** P9.4 Step 2 + Step 3 changes are uncommitted and verified —
-  `config.py` (+3 knobs: `UPDATE_CYCLE_ENABLED`/`UPDATE_CYCLE_INTERVAL_MIN`/`UPDATE_CYCLE_TICK_SECONDS`),
+- **Working tree:** clean — all P9.4 code is committed. Step 1 as `55c005d`; Steps 2 + 3 as
+  `1a14a12` (`config.py` +3 knobs: `UPDATE_CYCLE_ENABLED`/`UPDATE_CYCLE_INTERVAL_MIN`/`UPDATE_CYCLE_TICK_SECONDS`,
   `main.py` (lifespan wiring), `update_cycle_service.py` (new, driver loop + Step 3
   load/save-before-callback), `run_lifecycle.py` (+`update_cycle_state` dedicated
   table, `save_trigger_state` / `load_trigger_state`), `tests/test_update_cycle_service.py`
-  (11 tests), `tests/test_update_cycle_trigger_state.py` (19 tests).
-- **Regression baseline:** 699 passed, 2 skipped (Docker-only tests) with the P9.4
-  Step 2 + Step 3 changes applied (up from 691 at Step 3's first pass and 680 at
-  Step 2).
+  (11 tests), `tests/test_update_cycle_trigger_state.py` (19 tests)).
+- **Regression baseline:** 700 passed, 2 skipped (Docker-only tests) at the P9.4
+  closure check on 2026-08-31 (up from 699 after Step 2 + Step 3 were committed,
+  691 at Step 3's first pass and 680 at Step 2).
 - **Data state** (`current_state.json`, 2026-08-23): 5,210 instruments / 1,035,379 rows
   in DatasetStore; coverage: 5,210 with data, 14 missing, 1 current, 5,209 stale.
   (`sqlite_user_version: 3`.)
@@ -52,9 +52,9 @@ Phase 9.4 has all three steps done:
 
 ## 3. Pending Work / Open Items
 
-### Phase 9.4 — Steps 2 + 3 done
+### Phase 9.4 — all steps committed
 
-**P9.4 Step 2 (uncommitted):** `update_cycle_service.py` wires `UpdateCycleScheduler`
+**P9.4 Step 2 (committed in `1a14a12`):** `update_cycle_service.py` wires `UpdateCycleScheduler`
 into the FastAPI lifespan in `main.py` — when `UPDATE_CYCLE_ENABLED`, a `DatasetStore`
 is opened, the `UpdateCycleService` is constructed with `run_callback = run_update_cycle`
 (bound via closure), and started on a daemon thread. On teardown, `service.stop()` is
@@ -63,7 +63,7 @@ and calls `scheduler.run_once()`; the single-flight guard skips (rather than wai
 a cycle is already in flight. The feature defaults to **off** (`UPDATE_CYCLE_ENABLED=false`).
 See `update_cycle_scheduler_analysis.md` §4 for the original plan.
 
-**P9.4 Step 3 (uncommitted):** trigger-state persistence. The scheduler's trigger
+**P9.4 Step 3 (committed in `1a14a12`):** trigger-state persistence. The scheduler's trigger
 instant was previously process-local (in-memory `next_due`); a restart reset it to
 "never triggered" so the first tick after boot re-fired a cycle. Step 3 persists it in
 the JobEngine SQLite DB — in a **dedicated `update_cycle_state` table** (same DB as the
@@ -87,7 +87,7 @@ Planned follow-ups:
    real DatasetStore remains.
 
 ### Known limitations (from `current_architecture.md` "Current Limitations")
-1. **Scheduler timing is manual** — `run_update_cycle` is invoked on-demand; no cron/daemon loop. (P9.4 Step 1 supplies the trigger; Step 2 wires it into the service and Step 3 makes the trigger timing durable — all verified, uncommitted.)
+1. **Scheduler timing is manual** — `run_update_cycle` is invoked on-demand; no cron/daemon loop. (P9.4 Step 1 supplies the trigger; Step 2 wires it into the service and Step 3 makes the trigger timing durable — all committed: `55c005d` + `1a14a12`.)
 2. **No automatic freshness refresh** — coverage snapshots are generated on-demand.
 3. **BSE unsupported** — TDX source unreliable for Beijing Stock Exchange instruments; the BSE official API requires a browser session (audit: redirect loop). Snapshots lacking BSE land in VALIDATED_PARTIAL, never ACTIVE.
 4. **INDEX limited to 7 validated seeds** — full INDEX universe not generated (legacy 167-instrument index universe is deprecated as non-reproducible).
@@ -116,10 +116,11 @@ Planned follow-ups:
 - **P9.3-A / B / C** — Security master: foundation, coverage switch, refresh pipeline. COMPLETE.
 - **P9.4 Step 1** — Update cycle scheduler primitive. COMPLETE (`55c005d`).
 - **P9.4 Step 2** — FastAPI lifecycle wiring (`UpdateCycleService`, `main.py`, `config.py`).
-  VERIFIED (11/11 service tests; 680 passed / 2 skipped full regression). Uncommitted.
+  VERIFIED (11/11 service tests; 680 passed / 2 skipped full regression at the time). Committed in `1a14a12`.
 - **P9.4 Step 3** — Durable trigger-state persistence (`run_lifecycle` `update_cycle_state`
   table, separate from `update_runs`; `UpdateCycleService` load/save-before-callback).
-  VERIFIED (19/19 trigger-state tests; 699 passed / 2 skipped full regression). Uncommitted.
+  VERIFIED (19/19 trigger-state tests; 699 passed / 2 skipped full regression at the time). Committed in `1a14a12`.
+- **P9.4 closure** — final verification gate on 2026-08-31: targeted + full regression re-run (700 passed / 2 skipped), documentation audit corrected. Phase ready to declare COMPLETE.
 
 ## 6. Planned Future Work
 
