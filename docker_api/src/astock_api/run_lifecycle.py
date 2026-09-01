@@ -13,7 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 def _ensure_table(engine) -> None:
-    """Create update_runs table if it doesn't exist (idempotent)."""
+    """Create update_runs table if it doesn't exist (idempotent).
+
+    Also adds the ``job_ids`` column (JSON array) if missing, so that
+    run-level verification can be scoped to the exact jobs materialized
+    by that run.
+    """
     conn = engine._get_conn()
     try:
         conn.execute("""
@@ -28,10 +33,16 @@ def _ensure_table(engine) -> None:
                 jobs_done INTEGER DEFAULT 0,
                 jobs_failed INTEGER DEFAULT 0,
                 quality_status TEXT,
-                error_message TEXT
+                error_message TEXT,
+                job_ids TEXT
             )
         """)
         conn.commit()
+        # Add job_ids column to pre-existing tables (idempotent)
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(update_runs)")]
+        if "job_ids" not in cols:
+            conn.execute("ALTER TABLE update_runs ADD COLUMN job_ids TEXT")
+            conn.commit()
     finally:
         conn.close()
 
@@ -129,9 +140,22 @@ def set_planned(engine, run_id: int, plan_hash: str) -> None:
     transition(engine, run_id, "PLANNED", plan_hash=plan_hash)
 
 
-def set_executing(engine, run_id: int, jobs_created: int = 0) -> None:
-    """Transition to EXECUTING after job materialization."""
-    transition(engine, run_id, "EXECUTING", jobs_created=jobs_created)
+def set_executing(engine, run_id: int, jobs_created: int = 0, job_ids: list[str] | None = None) -> None:
+    """Transition to EXECUTING after job materialization.
+
+    Args:
+        engine: JobEngine instance.
+        run_id: Run id.
+        jobs_created: Number of jobs created by this run.
+        job_ids: Explicit list of job IDs materialized by this run.
+            Stored as JSON for run-scoped verification.
+    """
+    import json as _json
+    # Store "[]" for zero-job runs (explicit ownership: this run owns nothing)
+    # Store NULL for legacy callers that don't pass job_ids.
+    job_ids_json = _json.dumps(job_ids) if job_ids is not None else None
+    transition(engine, run_id, "EXECUTING", jobs_created=jobs_created,
+               job_ids=job_ids_json)
 
 
 def set_verifying(engine, run_id: int) -> None:
@@ -171,7 +195,7 @@ def get_latest_run(engine) -> dict | None:
     try:
         cur = conn.execute(
             "SELECT run_id, reference_date, started_at, finished_at, status, "
-            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message "
+            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message, job_ids "
             "FROM update_runs ORDER BY run_id DESC LIMIT 1"
         )
         row = cur.fetchone()
@@ -196,7 +220,7 @@ def get_last_successful_run(engine) -> dict | None:
     try:
         cur = conn.execute(
             "SELECT run_id, reference_date, started_at, finished_at, status, "
-            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message "
+            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message, job_ids "
             "FROM update_runs WHERE status='SUCCESS' ORDER BY run_id DESC LIMIT 1"
         )
         row = cur.fetchone()
@@ -222,7 +246,7 @@ def get_run(engine, run_id: int) -> dict | None:
     try:
         cur = conn.execute(
             "SELECT run_id, reference_date, started_at, finished_at, status, "
-            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message "
+            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message, job_ids "
             "FROM update_runs WHERE run_id=?",
             (run_id,),
         )
@@ -240,7 +264,7 @@ def get_runs(engine, limit: int = 10) -> list[dict]:
 
     Args:
         engine: JobEngine instance.
-        limit: Max number of runs to return.
+        limit: Max runs to return.
 
     Returns:
         List of run dicts, most recent first.
@@ -249,7 +273,7 @@ def get_runs(engine, limit: int = 10) -> list[dict]:
     try:
         cur = conn.execute(
             "SELECT run_id, reference_date, started_at, finished_at, status, "
-            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message "
+            "plan_hash, jobs_created, jobs_done, jobs_failed, quality_status, error_message, job_ids "
             "FROM update_runs ORDER BY run_id DESC LIMIT ?",
             (limit,),
         )

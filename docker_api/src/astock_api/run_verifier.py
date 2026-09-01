@@ -94,20 +94,45 @@ def verify_run(engine, run_id: int, store=None, universe_path: str | None = None
 
 
 def _check_job_completeness(engine, run) -> VerificationResult:
-    """Check 1: Job completeness — created == done + failed."""
+    """Check 1: Job completeness — created == done + failed.
+
+    Scoped to the exact job IDs materialized by THIS run (stored in
+    ``run['job_ids']``). When ``job_ids`` is absent (legacy runs or
+    zero-job runs), falls back to a structural check that does NOT
+    count global historical jobs.
+    """
     result = VerificationResult(status="PASS")
 
     created = run.get("jobs_created", 0)
     done = run.get("jobs_done", 0)
     failed = run.get("jobs_failed", 0)
 
-    # Query actual job counts from jobs table
+    # Parse the run's own job IDs (explicit ownership)
+    run_job_ids = _parse_run_job_ids(run)
+
     conn = engine._get_conn()
     try:
-        cur = conn.execute(
-            "SELECT status, COUNT(*) FROM jobs GROUP BY status"
-        )
-        job_counts = {row[0]: row[1] for row in cur.fetchall()}
+        if run_job_ids is not None:
+            if len(run_job_ids) > 0:
+                # Scoped: count only this run's jobs
+                placeholders = ",".join("?" * len(run_job_ids))
+                cur = conn.execute(
+                    f"SELECT status, COUNT(*) FROM jobs WHERE job_id IN ({placeholders}) GROUP BY status",
+                    run_job_ids,
+                )
+                job_counts = {row[0]: row[1] for row in cur.fetchall()}
+            else:
+                # Zero-job run with explicit ownership: nothing to check.
+                job_counts = {}
+        elif created == 0:
+            # Legacy zero-job run (no job_ids column): no jobs to check.
+            job_counts = {}
+        else:
+            # Legacy run without job_ids: use global counts (best effort).
+            cur = conn.execute(
+                "SELECT status, COUNT(*) FROM jobs GROUP BY status"
+            )
+            job_counts = {row[0]: row[1] for row in cur.fetchall()}
     finally:
         conn.close()
 
@@ -117,15 +142,12 @@ def _check_job_completeness(engine, run) -> VerificationResult:
     actual_running = job_counts.get("RUNNING", 0)
 
     # Check completeness: created == done + failed (only if no pending jobs)
-    # If jobs are still PENDING, they haven't executed yet — warn, don't fail.
     if created > 0 and (done + failed) != created:
         if actual_pending > 0 or actual_running > 0:
-            # Jobs still in flight — warn but don't fail
             result.warnings.append(
                 f"Jobs not yet complete: created={created}, done+failed={done + failed}, pending={actual_pending}, running={actual_running}"
             )
         else:
-            # No pending/running but incomplete — actual failure
             result.errors.append(
                 f"Job completeness mismatch: created={created}, done+failed={done + failed}"
             )
@@ -137,8 +159,8 @@ def _check_job_completeness(engine, run) -> VerificationResult:
     if actual_running > 0:
         result.warnings.append(f"{actual_running} jobs still RUNNING")
 
-    # Failure classification
-    failure_reasons = _get_failure_reasons(engine)
+    # Failure classification — scoped to this run's jobs
+    failure_reasons = _get_failure_reasons(engine, run_job_ids)
     upstream_no_data = failure_reasons.get("UPSTREAM_NO_DATA", 0)
     system_errors = failure_reasons.get("SYSTEM_ERROR", 0)
     identity_errors = failure_reasons.get("IDENTITY_ERROR", 0)
@@ -162,6 +184,7 @@ def _check_job_completeness(engine, run) -> VerificationResult:
         "failed": failed,
         "actual_done": actual_done,
         "actual_failed": actual_failed,
+        "run_job_count": len(run_job_ids) if run_job_ids else None,
         "failure_classification": {
             "upstream_no_data": upstream_no_data,
             "system_error": system_errors,
@@ -173,11 +196,52 @@ def _check_job_completeness(engine, run) -> VerificationResult:
     return result
 
 
-def _get_failure_reasons(engine) -> dict:
-    """Classify job failures by error pattern using failure_policy."""
+def _parse_run_job_ids(run: dict) -> list[str] | None:
+    """Extract the run's job ID list from the ``job_ids`` JSON column.
+
+    Returns:
+        - A list (possibly empty) when ``job_ids`` is stored (explicit
+          ownership, even if zero jobs).
+        - ``None`` when the column is absent/NULL (legacy run — no
+          explicit ownership recorded).
+    """
+    raw = run.get("job_ids")
+    if raw is None:
+        return None
+    try:
+        import json as _json
+        ids = _json.loads(raw)
+        if isinstance(ids, list):
+            return ids
+        return None
+    except (ValueError, TypeError):
+        return None
+
+
+def _get_failure_reasons(engine, run_job_ids: list[str] | None = None) -> dict:
+    """Classify job failures by error pattern using failure_policy.
+
+    Args:
+        engine: JobEngine instance.
+        run_job_ids: Optional explicit list of job IDs to scope the
+            classification to. When provided, only those jobs are
+            examined. When None, all FAILED jobs are classified
+            (legacy / global behavior).
+    """
     from astock_api.failure_policy import classify_failures_from_jobs, summarize_failures
 
-    decisions = classify_failures_from_jobs(engine)
+    if run_job_ids is not None:
+        if len(run_job_ids) == 0:
+            # Zero-job run: no failures to classify.
+            return {
+                "UPSTREAM_NO_DATA": 0,
+                "SYSTEM_ERROR": 0,
+                "IDENTITY_ERROR": 0,
+                "PARSER_ERROR": 0,
+            }
+        decisions = classify_failures_from_jobs(engine, job_ids=run_job_ids)
+    else:
+        decisions = classify_failures_from_jobs(engine)
     summary = summarize_failures(decisions)
 
     # Map to verifier's expected format

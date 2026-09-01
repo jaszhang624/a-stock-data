@@ -202,11 +202,14 @@ def classify_and_decide(error_message: str) -> FailureDecision:
     return get_decision(category)
 
 
-def classify_failures_from_jobs(engine) -> list[FailureDecision]:
+def classify_failures_from_jobs(engine, job_ids: list[str] | None = None) -> list[FailureDecision]:
     """Classify all failed jobs and return decisions.
 
     Args:
         engine: JobEngine instance with _get_conn().
+        job_ids: Optional explicit list of job IDs to scope the query to.
+            When provided, only those jobs are examined. When None, all
+            FAILED jobs are classified (global behavior).
 
     Returns:
         List of FailureDecision for each failed job.
@@ -218,14 +221,47 @@ def classify_failures_from_jobs(engine) -> list[FailureDecision]:
         columns = [row[1] for row in cur.fetchall()]
 
         if "error_message" not in columns:
-            # Fallback: treat all failed jobs as SYSTEM_ERROR
-            cur = conn.execute("SELECT COUNT(*) FROM jobs WHERE status='FAILED'")
-            failed_count = cur.fetchone()[0] or 0
-            return [get_decision(FailureCategory.SYSTEM_ERROR)] * failed_count
+            # Fallback: use last_error column if available, else treat as SYSTEM_ERROR
+            if "last_error" in columns:
+                if job_ids:
+                    placeholders = ",".join("?" * len(job_ids))
+                    cur = conn.execute(
+                        f"SELECT job_id, last_error FROM jobs WHERE status='FAILED' AND job_id IN ({placeholders})",
+                        job_ids,
+                    )
+                else:
+                    cur = conn.execute(
+                        "SELECT job_id, last_error FROM jobs WHERE status='FAILED'"
+                    )
+                decisions = []
+                for row in cur.fetchall():
+                    job_id, error_msg = row
+                    decision = classify_and_decide(error_msg or "")
+                    decisions.append(decision)
+                return decisions
+            else:
+                # No error column at all — treat all failed jobs as SYSTEM_ERROR
+                if job_ids:
+                    placeholders = ",".join("?" * len(job_ids))
+                    cur = conn.execute(
+                        f"SELECT COUNT(*) FROM jobs WHERE status='FAILED' AND job_id IN ({placeholders})",
+                        job_ids,
+                    )
+                else:
+                    cur = conn.execute("SELECT COUNT(*) FROM jobs WHERE status='FAILED'")
+                failed_count = cur.fetchone()[0] or 0
+                return [get_decision(FailureCategory.SYSTEM_ERROR)] * failed_count
 
-        cur = conn.execute(
-            "SELECT job_id, error_message FROM jobs WHERE status='FAILED'"
-        )
+        if job_ids:
+            placeholders = ",".join("?" * len(job_ids))
+            cur = conn.execute(
+                f"SELECT job_id, error_message FROM jobs WHERE status='FAILED' AND job_id IN ({placeholders})",
+                job_ids,
+            )
+        else:
+            cur = conn.execute(
+                "SELECT job_id, error_message FROM jobs WHERE status='FAILED'"
+            )
         decisions = []
         for row in cur.fetchall():
             job_id, error_msg = row
