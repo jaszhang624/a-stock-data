@@ -5,6 +5,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/src \
     TZ=Asia/Shanghai
 
+# Build provenance (populated at build time via --build-arg; surfaced at /health/version)
+ARG BUILD_SERVICE=a-stock-data-api
+ARG BUILD_IMAGE=
+ARG BUILD_PHASE=
+ARG BUILD_RELEASE=
+ARG BUILD_COMMIT=
+ARG BUILD_TIME=
+ENV BUILD_SERVICE=${BUILD_SERVICE} \
+    BUILD_IMAGE=${BUILD_IMAGE} \
+    BUILD_PHASE=${BUILD_PHASE} \
+    BUILD_RELEASE=${BUILD_RELEASE} \
+    BUILD_COMMIT=${BUILD_COMMIT} \
+    BUILD_TIME=${BUILD_TIME}
+
 WORKDIR /app
 
 # Install dependencies first (layer caching)

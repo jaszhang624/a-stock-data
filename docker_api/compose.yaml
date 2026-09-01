@@ -1,13 +1,14 @@
 services:
   a-stock-data-api:
     image: a-stock-data-api:${IMAGE_TAG:-latest}
+    platform: linux/amd64
     container_name: a-stock-data-api
     restart: unless-stopped
     ports:
-      - "8765:8000"
+      - "${ASTOCK_HOST_PORT:-8765}:8000"
     volumes:
-      - /share/Docker/a-stock-data/data:/app/data
-      - /share/Docker/a-stock-data/cache:/app/cache
+      - "${ASTOCK_HOST_DATA_DIR}:/app/data"
+      - "${ASTOCK_HOST_CACHE_DIR}:/app/cache"
     env_file:
       - .env
     environment:
