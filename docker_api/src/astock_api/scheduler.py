@@ -83,10 +83,11 @@ def run_update_cycle(
         logger.info("Materializing plan")
         report = materialize_plan(engine, plan.to_dict())
 
-        # EXECUTING — jobs materialized
+        # EXECUTING — jobs materialized (scoped to this run's job IDs)
         created_jobs_count = len(report["created_jobs"])
+        run_job_ids = [j["job_id"] for j in report["created_jobs"]]
         plan_hash = report["plan_hash"]
-        set_executing(engine, run_id, jobs_created=created_jobs_count)
+        set_executing(engine, run_id, jobs_created=created_jobs_count, job_ids=run_job_ids)
 
         # Step 4: Write artifacts
         report_path = write_materialization_report(report, output_dir=os.path.join(output_dir, "plans"))
